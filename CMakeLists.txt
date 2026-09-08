@@ -1,14 +1,17 @@
 cmake_minimum_required(VERSION 3.15.1)
-project(Reactor_Server)
+project(ReactorX)
 
-#服务器程序
-#查找源文件
-file(GLOB SRC ${PROJECT_SOURCE_DIR}/src/*.cpp)
-add_executable(Server ${SRC})
-
+# 编译标准
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -fno-omit-frame-pointer")
-set(CMAKE_LINKER_FLAGS_DEBUG "${CMAKE_LINKER_FLAGS_DEBUG} -fsanitize=address")
+set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address")
 
-#头文件路径
-set(HEADPATH ${PROJECT_SOURCE_DIR}/include)
-target_include_directories(Server PRIVATE ${HEADPATH})
+# 源文件
+file(GLOB_RECURSE SRC ${PROJECT_SOURCE_DIR}/src/*.cpp)
+
+
+add_executable(Reactor ${SRC})
+
+# 头文件根路径
+target_include_directories(Reactor PRIVATE ${PROJECT_SOURCE_DIR}/include)
