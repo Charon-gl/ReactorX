@@ -10,8 +10,8 @@ set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=add
 # 源文件
 file(GLOB_RECURSE SRC ${PROJECT_SOURCE_DIR}/src/*.cpp)
 
-
+add_subdirectory(llhttp)
 add_executable(Reactor ${SRC})
 
-# 头文件根路径
+target_link_libraries(Reactor PRIVATE llhttp)
 target_include_directories(Reactor PRIVATE ${PROJECT_SOURCE_DIR}/include)

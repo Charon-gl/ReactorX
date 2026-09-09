@@ -40,7 +40,8 @@ private:
     void on_read() override;
     void on_send() override;
     bool on_error(int) override;
-    void on_close(int err_no = 0) override;
+    void on_close(int err_no = 0) override;     // 框架层触发关闭
+    void process_close(int err_no = 0);     // 业务层主动发起关闭
 
 // 业务层接口
     Call_Process request_callback;    // 通知业务层取recvbuf数据进行处理

@@ -118,6 +118,12 @@ void TCPConnection::on_close(int err_no)
     static_cast<SubReactor *>(reactor())->dispatch_event(ConnectionCloseEvent{fd, res, err_no});
 }
 
+void TCPConnection::process_close(int err_no)
+{
+    CloseReason res = get_reason(err_no);
+    static_cast<SubReactor *>(reactor())->dispatch_event(ConnectionCloseEvent{fd, res, err_no});
+}
+
 void TCPConnection::activate(int fd)
 {
     recv_buf.reserve(MAX_BUF_SIZE);
