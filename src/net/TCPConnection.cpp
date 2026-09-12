@@ -61,7 +61,7 @@ void TCPConnection::on_read()
     }
     recv_buf += '\0';
 
-    request_callback(this);
+    request_callback();
     return;
 }
 
