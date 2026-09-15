@@ -7,6 +7,7 @@
 #include <vector>
 #include <unordered_map>
 #include <sys/epoll.h>
+#include <fcntl.h>
 #include "core/ReactorEvent.hpp"
 
 #define MAX_PER_CONNECTION 32768
@@ -34,16 +35,15 @@ protected:
     {
         {
             std::lock_guard<std::mutex> lock(mtx);
-            task_queue.emplace(std::forward<F>(event));
+            task_queue.emplace(std::forward<Event>(event));
         }
         send_wakeup();
     }
 
-    void loop();
     bool raw_epoll_ctl(int op, epoll_event *ev, int fd);
-    void run_all_tasks(); // 执行任务
-    virtual void core_error(int err_no) {};
-    virtual void io_event(int fd, u_int32_t events) {};
+    void run_all_tasks();                       // 执行任务
+    virtual void core_error(int err_no) {};     // eventfd出错的处理入口
+    virtual void io_event(int fd, uint32_t events) {};     // epoll事件分发
     void stop_epoll(int err_no = 0);
 
     int get_epfd() const noexcept;

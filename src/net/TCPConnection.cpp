@@ -1,3 +1,4 @@
+#include "reactor/SubReactor.hpp"
 #include "net/TCPConnection.hpp"
 
 std::unordered_map<Conn_state, std::unordered_set<Conn_state>> transition_table = {
@@ -38,13 +39,15 @@ void TCPConnection::on_read()
 
     while(true)
     {
-        int res = read(fd, recv_buf.data(), recv_buf.size());
+        size_t n = recv_buf.size();
+        recv_buf.resize(n + MAX_BUF_SIZE);
+        int res = read(fd, recv_buf.data() + n, recv_buf.capacity() - n);
         if(res == 0)
         {// 一种是正处于processing态，关闭读监听，继续后面的流程；一种是处于connected状态，可以走关闭流程
             switch (cur)
             {
             case Conn_state::PROCESSING:
-                disable_event(EPOLLIN);
+                unvaild();
                 return;
             default:
                 on_close();
@@ -53,13 +56,16 @@ void TCPConnection::on_read()
         }
         else if (res == -1)
         {
+            recv_buf.resize(n);
             bool res = on_error(errno);
             if(!res)
                 break;
             return;
         }
+
+        // 接收到了，手动更新size
+        recv_buf.resize(n + res);
     }
-    recv_buf += '\0';
 
     request_callback();
     return;
@@ -74,7 +80,7 @@ void TCPConnection::on_send()
     size_t n = send_buf.size();
     while (!send_buf.empty())
     {
-        int res = send(fd, send_buf.data(), n - send_begin_pos, 0);
+        int res = send(fd, send_buf.data() + send_begin_pos, n - send_begin_pos, 0);
         if(res > 0)
             send_begin_pos += res;
         else if(res < 0)
@@ -86,11 +92,17 @@ void TCPConnection::on_send()
         {
             transition(Conn_state::CLOSING);
             on_close();
+            return;
         }
     }
     // 执行到这意味着当前写缓冲区的数据已全部发送完毕，可以给写缓冲区清空数据
     send_buf.clear();
     disable_event(EPOLLOUT);
+
+    if(!is_vaild())     // vaild为false，说明连接可以关闭了
+    {
+        on_close();
+    }
 
     return;
 }
@@ -114,6 +126,7 @@ void TCPConnection::on_close(int err_no)
     if(state.load(std::memory_order_seq_cst) == Conn_state::PROCESSING)
         close_callback(this, err_no);
 
+    unvaild();
     CloseReason res = get_reason(err_no);
     static_cast<SubReactor *>(reactor())->dispatch_event(ConnectionCloseEvent{fd, res, err_no});
 }
@@ -128,12 +141,14 @@ void TCPConnection::activate(int fd)
 {
     recv_buf.reserve(MAX_BUF_SIZE);
     send_buf.reserve(MAX_BUF_SIZE);
+    transition(Conn_state::CONNECTED);
 
     activate_impl(fd);
 }
 
 void TCPConnection::deactivate()
 {
+    transition(Conn_state::UNCONNECT);
     recv_buf.clear();
     send_buf.clear();
     send_begin_pos = 0;
@@ -149,9 +164,12 @@ size_t TCPConnection::readable_bytes() const { return recv_buf.size(); }
 
 void TCPConnection::consume(size_t len)
 {
-    if(len > recv_buf.size() || len <= 0)
-        return;
-    recv_buf.erase(0, len);
+    if(state.load(std::memory_order_seq_cst) == Conn_state::PROCESSING)
+    {
+        if(len > recv_buf.size() || len <= 0)
+            return;
+        recv_buf.erase(0, len);
+    }
 }
 
 void TCPConnection::clear_recvbuf()
@@ -161,12 +179,15 @@ void TCPConnection::clear_recvbuf()
 
 void TCPConnection::append_buf(const char *data, size_t len)
 {
-    if(data == nullptr)
-        return;
-    send_buf.append(data, len);
+    if(state.load(std::memory_order_seq_cst) == Conn_state::PROCESSING)
+    {
+        if(data == nullptr)
+            return;
+        send_buf.append(data + send_buf.size(), len);
+    } 
 }
 
-size_t TCPConnection::sendable_bytes() const { return send_buf.size(); }
+size_t TCPConnection::sendable_bytes() const { return send_buf.size() - send_begin_pos; }       // 非线程安全
 
 void TCPConnection::set_request_callback(Call_Process _cb) { request_callback = std::move(_cb); }
 
@@ -188,6 +209,8 @@ void TCPConnection::exit_processing()
 
 TCPConnection::~TCPConnection()
 {
+    request_callback = nullptr;
+    close_callback = nullptr;
 }
 
 /*对于多线程/协程的业务处理，需要考虑安全问题，

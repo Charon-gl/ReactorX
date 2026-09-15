@@ -4,13 +4,13 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
-#include "Channel.hpp"
-#include "Acceptor.hpp"
+#include "core/Channel.hpp"
+#include "net/Acceptor.hpp"
 #include "core/ReactorBase.hpp"
 #include "SubReactor.hpp"
 
-#define MAX_LISTEN_NUM 1024
 #define MAX_LISTENER_NUM 10
+
 
 class SubReactor;
 
@@ -18,26 +18,27 @@ class MainReactor : public ReactorBase
 {
 private:
     using sub_reactor_set = std::unordered_map<std::thread::id, std::unique_ptr<SubReactor>>;
+    
     sub_reactor_set::iterator round_ptr;
 
     std::unordered_map<std::thread::id, std::unique_ptr<std::thread>> sub_reactor_threads;
     sub_reactor_set sub_reactors;
     std::unordered_map<int, std::unique_ptr<Acceptor>> active_listeners;
 
-    MainReactor(uint16_t port, int core_num);
+    MainReactor(uint16_t port, int core_num, std::function<void(TCPConnection*)> _cb);
     
-    void add_sub_reactor();
+    void add_sub_reactor(std::function<void(TCPConnection*)> _cb);
     void reactor_fatal_event(int err_no) override; // 删除单个sub_reactor
     void reactor_close_event(std::thread::id thread_id, int err_no) override;
 
-    void add_listener(const sockaddr_in &addr);
+    bool add_listener(uint16_t port);
 
     void update_round_ptr();
 
 public:
-    static MainReactor &instance(uint16_t port, int core_num);
+    static MainReactor &instance(uint16_t port, int core_num, std::function<void(TCPConnection*)> _cb);
+        
     void remove_listener(int fd, CloseReason reason, int err_no);
-
     // 轮询分发
     void round_dispatch(int fd);
     

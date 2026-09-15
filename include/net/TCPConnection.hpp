@@ -10,7 +10,6 @@
 #include <unordered_set>
 #include "core/Channel.hpp"
 #include "core/IO_Object.hpp"
-#include "reactor/SubReactor.hpp"
 #include "utils/Err_Manager.hpp"
 
 #define MAX_BUF_SIZE 1024
@@ -23,6 +22,9 @@ enum class Conn_state       // 新增连接状态机，定义以下连接状态
     CLOSING,            // 连接关闭中
 };
 
+
+class SubReactor;
+
 class TCPConnection : public IO_Object
 {
 private:
@@ -31,10 +33,10 @@ private:
 
     std::string recv_buf;
     std::string send_buf;
-    size_t send_begin_pos;
+    size_t send_begin_pos;      // 尚未发送的数据起始位置
     std::atomic<Conn_state> state;
 
-    bool transition(Conn_state new_state);      //状态转换接口
+    bool transition(Conn_state new_state);      //状态转换函数
 
 // 事件处理函数
     void on_read() override;
@@ -47,13 +49,14 @@ private:
     Call_Connection_Close close_callback;   // 通知业务层连接已关闭
     
 public:
-    TCPConnection(SubReactor* reactor);
+    TCPConnection(SubReactor*);
     
     void activate(int fd);      // 激活函数，绑定channel，初始化状态等
     void deactivate();      //注销函数，注销channel
     
     Conn_state get_state() const;   // 返回当前状态
     
+    // 修改缓冲区的操作要求对象处于processing态
     // recvbuf
     const char *peek() const;       // 返回recvbuf头部指针，要注意失效问题
     size_t readable_bytes() const;    // 返回recvbuf可读字节数

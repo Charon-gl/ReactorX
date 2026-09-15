@@ -24,7 +24,7 @@ private:
     uint32_t events;
     int _errno;
     std::atomic<bool> valid;        //标志位，true表示fd有效
-    std::function<void(Channel *)> update_events;
+    std::function<void(Channel*)> update_events;
 
     std::function<void()> trigger_read;
     std::function<void()> trigger_send;
@@ -36,15 +36,19 @@ public:
     void handle_events(uint32_t); // 接收来自epoll的事件，并传给业务层
 
     void enable_events(uint32_t tar_events);
-    void disbale_events(uint32_t tar_events);
+    void disable_events(uint32_t tar_events);
     void clear_events();
     
     int get_fd() const;
     u_int32_t get_events() const;
 
+    bool get_vaild() const;
+    void unvaild();     // 设vaild为false，并注销读监听
+
     void set_read_cb(std::function<void()> _cb);
     void set_send_cb(std::function<void()> _cb);
     void set_error_cb(std::function<void(int)> _cb);
+    void set_update_events(std::function<void(Channel*)> _cb);
 
     Channel(Channel &&) = delete;
     Channel &operator=(Channel &&) = delete;

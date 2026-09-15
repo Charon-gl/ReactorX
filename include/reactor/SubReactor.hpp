@@ -17,23 +17,17 @@ class SubReactor : public ReactorBase
 private:
     std::unordered_map<int, std::unique_ptr<TCPConnection>> connections;
 
-    std::function<void(std::thread::id, int)> call_main_reactor; // 从reactor给主reactor通信的回调接口
+    std::function<void(const ReactorFatalEvent&)> call_main_reactor; // 从reactor给主reactor通信的回调接口
     void new_connection_event(int fd) override;
     void reactor_fatal_event(int err_no) override;
+    std::function<void(TCPConnection*)> business_handler;
 
-protected:
 public:
-    SubReactor();
-
-    void run();
+    SubReactor(std::function<void(TCPConnection*)> business_handler);
 
     void connection_close_event(int fd, CloseReason reason, int err_no) override;
 
-    template <typename F>
-    void set_call_main_reactor(F &&_cb)
-    {
-        call_main_reactor = std::forward<F>(_cb);
-    }
+    void set_call_main_reactor(std::function<void(const ReactorFatalEvent&)> _cb);
 
     ~SubReactor();
 

@@ -6,27 +6,26 @@
 EventLoop::EventLoop()
     : is_stop(false), fatal_errno(0)
 {
-    int fd = eventfd(0, 0); // Channel构造函数会设为非阻塞模式
-    if (fd == -1)
+    event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (event_fd == -1)
     {
         exit(1);
     }
-    event_fd = fd;
 
-    int _epfd = epoll_create(1);
-    if (_epfd == -1)
+    epfd = epoll_create(1);
+    if (epfd == -1)
     {
         // std::cerr << "Epoll_create failed" << std::endl;
         exit(1);
     }
-    epfd = _epfd;
 
-    evs.reserve(MAX_PER_CONNECTION);
+    evs.resize(MAX_PER_CONNECTION);
 
     epoll_event ev;
     ev.data.fd = event_fd;
     ev.events = EPOLLIN | EPOLLET;
-    bool res = raw_epoll_ctl(EPOLL_CTL_ADD, &ev, event_fd);
+    
+    raw_epoll_ctl(EPOLL_CTL_ADD, &ev, event_fd);
 }
 
 void EventLoop::send_wakeup()
@@ -53,7 +52,7 @@ void EventLoop::loop()
 {
     while (!is_stop)
     {
-        int nums_fd = epoll_wait(epfd, evs.data(), sizeof(evs) / sizeof(evs[0]), -1);
+        int nums_fd = epoll_wait(epfd, evs.data(), evs.size(), -1);
         if (nums_fd < 0)
         {
             core_error(errno);
@@ -71,7 +70,7 @@ void EventLoop::loop()
 
 bool EventLoop::raw_epoll_ctl(int op, epoll_event *ev, int fd)
 {
-    int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, ev);
+    int ret = epoll_ctl(epfd, op, fd, ev);
     if (ret == -1)
     {
         core_error(errno);

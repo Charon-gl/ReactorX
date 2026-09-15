@@ -28,6 +28,6 @@ Err_Rank Err_Manager::err_judge(int err_no)
     case ENOMEM:
         return Err_Rank::FATAL;
     default:
-        return;
+        return Err_Rank::CLOSE_CONNECTION;
     }
 }

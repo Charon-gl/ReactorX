@@ -30,6 +30,7 @@ struct HttpResponse
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;
 
+    HttpResponse() {}
     HttpResponse(int _status) : status(_status) {}
 };
 
@@ -64,14 +65,18 @@ private:
 
 
     // 业务层接口
-    std::function<void(const HttpRequest&)> push_request;
+    std::function<HttpResponse(const HttpRequest&)> push_request;
 
 public:
     static const llhttp_settings_t& setting();
 
-    http_handler(TCPConnection *);
+    http_handler();
 
-    void set_push_request(std::function<void(const HttpRequest&)> _cb);
+    void bind_connection(TCPConnection *);
+
+    void set_push_request(std::function<HttpResponse(const HttpRequest&)> _cb);
 
     void response(const HttpResponse&);
+
+    ~http_handler();
 };

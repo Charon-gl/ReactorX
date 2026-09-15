@@ -5,27 +5,12 @@ ReactorBase::ReactorBase()
     channels.reserve(MAX_PER_CONNECTION);
 }
 
+void ReactorBase::run() { loop(); }
+
 void ReactorBase::unregister_channel(int fd)
 {
-    while (true)
-    {
-        raw_epoll_ctl(EPOLL_CTL_DEL, nullptr, fd);
-        break;
-    }
+    raw_epoll_ctl(EPOLL_CTL_DEL, nullptr, fd);
     channels.erase(fd);
-}
-
-void ReactorBase::update_channel(Channel *channel)
-{
-    int fd = channel->get_fd();
-    epoll_event ev;
-    ev.data.fd = fd;
-    ev.events = channel->get_events();
-    while (true)
-    {
-        raw_epoll_ctl(EPOLL_CTL_MOD, &ev, fd);
-        break;
-    }
 }
 
 void ReactorBase::core_error(int err_no)

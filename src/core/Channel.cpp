@@ -1,7 +1,7 @@
 #include "core/Channel.hpp"
 
 Channel::Channel(int _fd) 
-    : fd(_fd), events(EPOLLET)
+    : fd(_fd), events(EPOLLET), valid(true)
 {
     int flag = fcntl(fd, F_GETFL);
     fcntl(fd, F_SETFL, flag | O_NONBLOCK);
@@ -9,26 +9,31 @@ Channel::Channel(int _fd)
 
 void Channel::enable_events(uint32_t tar_events)
 {
-    if(events & tar_events)
-        return;
-    events |= tar_events;
-    update_events(this);
+    auto new_events = events | tar_events;
+    if(events != new_events)
+    {
+        events = new_events;
+        update_events(this);
+    }
 }
 
-void Channel::disbale_events(uint32_t tar_events)
+void Channel::disable_events(uint32_t tar_events)
 {
-    if(!(events & tar_events))
-        return;
-    events &= ~tar_events;
-    update_events(this);
+    auto new_events = events & ~tar_events;
+    if(events != new_events)
+    {
+        events = new_events;
+        update_events(this);
+    }
 }
 
 void Channel::clear_events()
 {
-    if(events == 0)
-        return;
-    events = 0;
-    update_events(this);
+    if(events != 0)
+    {
+        events = 0;
+        update_events(this);
+    }
 }
 
 void Channel::handle_events(uint32_t revents)
@@ -57,9 +62,21 @@ void Channel::handle_events(uint32_t revents)
 int Channel::get_fd() const { return fd; }
 uint32_t Channel::get_events() const { return events; }
 
+bool Channel::get_vaild() const { return valid.load(std::memory_order_seq_cst); }
+void Channel::unvaild()
+{
+    auto res = valid.load(std::memory_order_seq_cst);
+    if(res)
+    {
+        valid.store(false);
+        disable_events(EPOLLIN);
+    }
+}
+
 void Channel::set_read_cb(std::function<void()> _cb) { trigger_read = std::move(_cb); }
 void Channel::set_send_cb(std::function<void()> _cb) { trigger_send = std::move(_cb); }
 void Channel::set_error_cb(std::function<void(int)> _cb) { trigger_error = std::move(_cb); }
+void Channel::set_update_events(std::function<void(Channel*)> _cb) { update_events = std::move(_cb); }
 
 Channel::~Channel()
 {

@@ -1,4 +1,4 @@
-#include "protocol/http/http_handler.hpp"
+#include "http_handler.hpp"
 
 
 void HttpRequest::reset()
@@ -32,14 +32,20 @@ const llhttp_settings_t& http_handler::setting()
     return s;
 }
 
-http_handler::http_handler(TCPConnection* tcpconnection)
-    : parser(std::make_unique<llhttp_t>()), connection(tcpconnection)
+http_handler::http_handler()
+    : parser(std::make_unique<llhttp_t>()), connection(nullptr)
 {
     llhttp_init(parser.get(), HTTP_REQUEST, &setting());
     parser->data = this;
+}
+
+void http_handler::bind_connection(TCPConnection* tcpconnection)
+{
+    connection = tcpconnection;
 
     // tcpconnection的回调
     connection->set_request_callback([this]{
+        static int call_cnt = 0;
         const char* data = connection->peek();
         size_t len = connection->readable_bytes();
 
@@ -47,10 +53,17 @@ http_handler::http_handler(TCPConnection* tcpconnection)
             return;
 
         auto res = llhttp_execute(parser.get(), data, len);
-        if(res != HPE_OK)  // 请求非法，直接发送400并主动断开连接
-        {
+        connection->consume(len);
+        fprintf(stderr, "callback#%d len=%zu parser_state=%d\n",++call_cnt, len, llhttp_get_status_code(parser.get()));
+
+        if(res != HPE_OK)  
+        {      // 请求非法，直接发送400并主动断开连接
+        /*
+            同on_read，要先发送完数据再关闭连接，但是无法确定能不能在发送完数据后才触发eventfd的事件(理论上这么点数据是能发完的)，
+            因此有个更好的方案是设置读事件标志位，当标志位为false时发送完数据就可以关闭连接，否则不能关闭连接  
+        */
             response(HttpResponse{400});
-            connection->process_close();
+            connection->unvaild();
         }
     });
 }
@@ -126,8 +139,12 @@ int http_handler::on_message_complete(llhttp_t* parser)
 
     //将解析好的请求报文交给业务层
     if(it->push_request)
-        it->push_request(it->request);
+    {
+        const auto& response_data = it->push_request(it->request);
+        it->response(response_data);
+    }
 
+    it->connection->exit_processing();
     return 0;
 }
 
@@ -157,7 +174,16 @@ void http_handler::response(const HttpResponse& data)
     response_buf += data.body;
 
     connection->append_buf(response_buf.data(), response_buf.size());
+
+    // 打开写监听
+    connection->enable_event(EPOLLOUT);
     return;
 }
 
-void http_handler::set_push_request(std::function<void(const HttpRequest&)> _cb) { push_request = std::move(_cb); }
+void http_handler::set_push_request(std::function<HttpResponse(const HttpRequest&)> _cb) { push_request = std::move(_cb); }
+
+http_handler::~http_handler()
+{
+    connection = nullptr;
+    delete this;
+}
