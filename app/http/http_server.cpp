@@ -9,11 +9,11 @@ http_server::http_server(uint16_t port, int core_num)
 
 void http_server::attach(TCPConnection* connection)
 {
-    auto handler = new http_handler();      // ~http_handler() 实现了delete this
+    auto handler = std::make_unique<http_handler>();
     handler->set_push_request([this](const HttpRequest& data){
         return push_response();
     });
-    handler->bind_connection(connection);
+    handler->bind_connection(connection, std::move(handler));
 }
 
 HttpResponse http_server::push_response()

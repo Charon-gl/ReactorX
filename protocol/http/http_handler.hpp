@@ -53,6 +53,7 @@ private:
     
     // 异步情况下TCPConnection可能会向业务层发送关闭信号，所以还需要预留一个接口
     
+    void on_request();
 
     // 绑定到settings的回调
     static int on_message_begin(llhttp_t* parser);
@@ -72,7 +73,7 @@ public:
 
     http_handler();
 
-    void bind_connection(TCPConnection *);
+    void bind_connection(TCPConnection *, std::unique_ptr<http_handler> self);
 
     void set_push_request(std::function<HttpResponse(const HttpRequest&)> _cb);
 

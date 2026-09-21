@@ -1,10 +1,11 @@
+#include <unordered_set>
 #include "reactor/SubReactor.hpp"
 #include "net/TCPConnection.hpp"
 
 std::unordered_map<Conn_state, std::unordered_set<Conn_state>> transition_table = {
     {Conn_state::UNCONNECT, {Conn_state::CONNECTED}},
-    {Conn_state::CONNECTED, {Conn_state::PROCESSING, Conn_state::CLOSING}},
-    {Conn_state::PROCESSING, {Conn_state::CONNECTED, Conn_state::CLOSING}},
+    {Conn_state::CONNECTED, {/*Conn_state::PROCESSING, */Conn_state::CLOSING}},
+    //{Conn_state::PROCESSING, {Conn_state::CONNECTED, Conn_state::CLOSING}},
     {Conn_state::CLOSING, {Conn_state::UNCONNECT}}
 };
 
@@ -13,46 +14,54 @@ bool is_valid_transition(Conn_state cur_state, Conn_state new_state)        //�
     return transition_table[cur_state].count(new_state);
 }
 
-TCPConnection::TCPConnection(SubReactor* reactor) 
-    : IO_Object{reactor}, send_begin_pos(0), state{Conn_state::UNCONNECT}
+TCPConnection::TCPConnection(SubReactor* reactor, std::function<void(Request)> request_callback) 
+        : IO_Object{reactor},
+            token(ConnectionToken{}),
+            send_begin_pos(0),
+            state{Conn_state::UNCONNECT},
+            close_event_sent(false)
 {    
     recv_buf.reserve(MAX_BUF_SIZE);
     send_buf.reserve(MAX_BUF_SIZE);
+
+    set_request_submit(std::move(request_callback));
 }
 
 bool TCPConnection::transition(Conn_state new_state)
 {
-    Conn_state cur = state.load(std::memory_order_seq_cst);
-    if(!is_valid_transition(cur, new_state))
-        return false;
+    if(is_valid_transition(state, new_state))
+    {
+        state = new_state;
+        return true;
+    }
 
-    while(!state.compare_exchange_strong(cur, new_state, std::memory_order_seq_cst))
-        ;
-    return true;
+    return false;
 }
 
 void TCPConnection::on_read()
 {
-    Conn_state cur = state.load(std::memory_order_seq_cst);
-    if (cur == Conn_state::UNCONNECT || cur == Conn_state::CLOSING)
+    if (state == Conn_state::UNCONNECT || state == Conn_state::CLOSING)
         return;
 
+    int fd = channel->get_fd();
     while(true)
     {
         size_t n = recv_buf.size();
         recv_buf.resize(n + MAX_BUF_SIZE);
         int res = read(fd, recv_buf.data() + n, recv_buf.capacity() - n);
         if(res == 0)
-        {// 一种是正处于processing态，关闭读监听，继续后面的流程；一种是处于connected状态，可以走关闭流程
-            switch (cur)
-            {
-            case Conn_state::PROCESSING:
-                unvaild();
-                return;
-            default:
+        {   // 正处于processing态，关闭读监听，继续后面的流程；
+            // 处于connected状态，可以走关闭流程
+
+            if(request_count.get() == 0 && send_buf.size() == 0)
+            // 计数器为0只代表请求已经处理完，但不代表已全部发送完。因此要检查sendbuf是否清0才能关
                 on_close();
-                return;
+            else
+            {
+                transition(Conn_state::CLOSING);
+                channel->disable_events(EPOLLIN);
             }
+            return;
         }
         else if (res == -1)
         {
@@ -67,20 +76,28 @@ void TCPConnection::on_read()
         recv_buf.resize(n + res);
     }
 
-    request_callback();
+    std::string data;
+    data.reserve(MAX_BUF_SIZE);
+    swap(data, recv_buf);
+    
+    submit_request(Request{token, std::move(data)});
+    request_count.inc();        // 请求数量+1
     return;
 }
 
 void TCPConnection::on_send()
 {
-    auto cur = state.load(std::memory_order_seq_cst);
-    if (cur == Conn_state::UNCONNECT || cur == Conn_state::CLOSING)
+    if (state == Conn_state::UNCONNECT)
         return;
 
-    size_t n = send_buf.size();
-    while (!send_buf.empty())
+    int fd = channel->get_fd();
+    while (send_begin_pos < send_buf.size())
     {
-        int res = send(fd, send_buf.data() + send_begin_pos, n - send_begin_pos, 0);
+        int res = send(
+            fd,
+            send_buf.data() + send_begin_pos,
+            send_buf.size() - send_begin_pos,
+            0);
         if(res > 0)
             send_begin_pos += res;
         else if(res < 0)
@@ -88,21 +105,14 @@ void TCPConnection::on_send()
             on_error(errno);
             return;
         }
-        else
-        {
-            transition(Conn_state::CLOSING);
-            on_close();
-            return;
-        }
     }
     // 执行到这意味着当前写缓冲区的数据已全部发送完毕，可以给写缓冲区清空数据
     send_buf.clear();
-    disable_event(EPOLLOUT);
+    send_begin_pos = 0;
+    channel->disable_events(EPOLLOUT);
 
-    if(!is_vaild())     // vaild为false，说明连接可以关闭了
-    {
+    if(request_count.get() == 0 && state == Conn_state::CLOSING)     // 响应已经发送完，连接可以关闭了
         on_close();
-    }
 
     return;
 }
@@ -116,101 +126,64 @@ bool TCPConnection::on_error(int err_no)
     case Err_Rank::RETRY:       // 非阻塞io不会EINTR，这里直接忽略即可
         return false;
     default:
+        channel->disable_events(EPOLLIN);
+        transition(Conn_state::CLOSING);
         on_close(err_no);
     }
     return true;
 }
 
 void TCPConnection::on_close(int err_no)
-{// 若此时仍在处理业务，要告知业务层该连接即将关闭，不要再访问该TCPConnection
-    if(state.load(std::memory_order_seq_cst) == Conn_state::PROCESSING)
-        close_callback(this, err_no);
+{
+    if (close_event_sent)
+        return;
 
-    unvaild();
+    close_event_sent = true;
+    transition(Conn_state::CLOSING);
+    channel->disable_events(EPOLLIN | EPOLLRDHUP);
+    shutdown(channel->get_fd(), SHUT_WR);
     CloseReason res = get_reason(err_no);
-    static_cast<SubReactor *>(reactor())->dispatch_event(ConnectionCloseEvent{fd, res, err_no});
+    static_cast<SubReactor*>(reactor)->dispatch_event(ConnectionCloseEvent{token, res, err_no});
 }
 
-void TCPConnection::process_close(int err_no)
+void TCPConnection::activate(Channel* channel, ConnectionToken token_)
 {
-    CloseReason res = get_reason(err_no);
-    static_cast<SubReactor *>(reactor())->dispatch_event(ConnectionCloseEvent{fd, res, err_no});
-}
-
-void TCPConnection::activate(int fd)
-{
+    token = token_;
+    close_event_sent = false;
     recv_buf.reserve(MAX_BUF_SIZE);
     send_buf.reserve(MAX_BUF_SIZE);
     transition(Conn_state::CONNECTED);
 
-    activate_impl(fd);
+    activate_impl(channel);
 }
 
 void TCPConnection::deactivate()
 {
-    transition(Conn_state::UNCONNECT);
+    token = {};
     recv_buf.clear();
     send_buf.clear();
     send_begin_pos = 0;
-
-    deactive_impl(fd);
+    
+    deactive_impl();
+    transition(Conn_state::UNCONNECT);
 }
 
-Conn_state TCPConnection::get_state() const { return state.load(); }
-
-const char *TCPConnection::peek() const { return recv_buf.data(); }
-
-size_t TCPConnection::readable_bytes() const { return recv_buf.size(); }
-
-void TCPConnection::consume(size_t len)
+void TCPConnection::to_send(const char* data, size_t len)
 {
-    if(state.load(std::memory_order_seq_cst) == Conn_state::PROCESSING)
+    request_count.dec();        // 发送是流式发送，不能确定一次发送了多少个请求，因此当响应数据返回后就将计数器-1,表示1个业务完成
+    send_buf.append(data, len);
+    channel->enable_events(EPOLLOUT);
+}
+
+void TCPConnection::to_close()
+{
+    if(state != Conn_state::CLOSING)
     {
-        if(len > recv_buf.size() || len <= 0)
-            return;
-        recv_buf.erase(0, len);
+        channel->disable_events(EPOLLIN);
+        transition(Conn_state::CLOSING);
     }
-}
-
-void TCPConnection::clear_recvbuf()
-{
-    recv_buf.clear();
-}
-
-void TCPConnection::append_buf(const char *data, size_t len)
-{
-    if(state.load(std::memory_order_seq_cst) == Conn_state::PROCESSING)
-    {
-        if(data == nullptr)
-            return;
-        send_buf.append(data + send_buf.size(), len);
-    } 
-}
-
-size_t TCPConnection::sendable_bytes() const { return send_buf.size() - send_begin_pos; }       // 非线程安全
-
-void TCPConnection::set_request_callback(Call_Process _cb) { request_callback = std::move(_cb); }
-
-void TCPConnection::set_close_callback(Call_Connection_Close _cb) { close_callback = std::move(_cb); }
-
-void TCPConnection::enter_processing()
-{
-    if(state.load(std::memory_order_seq_cst) != Conn_state::CONNECTED)
-        return;
-    transition(Conn_state::PROCESSING);
-}
-
-void TCPConnection::exit_processing()
-{
-    if (state.load(std::memory_order_seq_cst) != Conn_state::PROCESSING)
-        return;
-    transition(Conn_state::CONNECTED);
-}
-
-TCPConnection::~TCPConnection()
-{
-    request_callback = nullptr;
-    close_callback = nullptr;
+    if(request_count.get() == 0)
+        on_close();
 }
 
 /*对于多线程/协程的业务处理，需要考虑安全问题，

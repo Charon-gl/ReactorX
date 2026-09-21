@@ -1,12 +1,12 @@
 #include "reactor/MainReactor.hpp"
-#include <cstring>
+#include <cstdlib>
 #include <arpa/inet.h>
 #include <sys/eventfd.h>
 #include "utils/Err_Manager.hpp"
 
 
 /*-------------MainReactor--------------*/
-MainReactor::MainReactor(uint16_t port, int core_num, std::function<void(TCPConnection*)> _cb) 
+MainReactor::MainReactor(uint16_t port, int core_num, FrameWorkDispatcher& dispatcher)
 {
     sub_reactor_threads.reserve(core_num);
     sub_reactors.reserve(core_num);
@@ -15,7 +15,7 @@ MainReactor::MainReactor(uint16_t port, int core_num, std::function<void(TCPConn
     // subreactor
     for (int i = 0; i < core_num; ++i)
     {
-        add_sub_reactor(std::move(_cb));
+        add_sub_reactor(std::ref(dispatcher));
     }
     
     // 开一个listener
@@ -24,12 +24,6 @@ MainReactor::MainReactor(uint16_t port, int core_num, std::function<void(TCPConn
         exit(1);    // 初始化失败，直接终止程序
     
     round_ptr = sub_reactors.begin();
-}
-
-MainReactor& MainReactor::instance(uint16_t port, int core_num, std::function<void(TCPConnection*)> _cb)
-{
-    static MainReactor acceptor(port, core_num, std::move(_cb));
-    return acceptor;
 }
 
 void MainReactor::round_dispatch(int fd)
@@ -45,20 +39,21 @@ void MainReactor::update_round_ptr()
         round_ptr = sub_reactors.begin();
 }
 
-void MainReactor::add_sub_reactor(std::function<void(TCPConnection*)> _cb)
+void MainReactor::add_sub_reactor(FrameWorkDispatcher& dispatcher)
 {
-    auto subreactor = std::make_unique<SubReactor>(std::move(_cb));
+    uint32_t num = reactor_counter.get();
+    auto subreactor = std::make_unique<SubReactor>(num, dispatcher);
     subreactor->set_call_main_reactor([this](ReactorFatalEvent event) { 
         dispatch_event(event); 
     });
     std::thread t([subreactor = subreactor.get()] { 
         subreactor->run(); 
     });
-
-    std::thread::id tid = t.get_id();
-
-    sub_reactor_threads.emplace(tid, std::make_unique<std::thread>(std::move(t)));
-    sub_reactors.emplace(tid, std::move(subreactor));
+    
+    
+    sub_reactor_threads.emplace(num, std::make_unique<std::thread>(std::move(t)));
+    sub_reactors.emplace(num, std::move(subreactor));
+    reactor_counter.inc();
     round_ptr = sub_reactors.begin();
 }
 
@@ -66,10 +61,12 @@ bool MainReactor::add_listener(uint16_t port)
 {
     // 初始化,然后加入active_listeners
     auto acceptor = std::make_unique<Acceptor>(this);
-    auto res = acceptor->active(port);
-    if(!res)
+    auto channel = acceptor->active(port);
+    if(channel == nullptr)
         return false;
-    active_listeners.emplace(acceptor->get_fd(), std::move(acceptor));
+
+    active_listeners.emplace(channel->get_fd(), std::move(acceptor));
+    register_channel(std::move(channel));
 
     return true;
 }
@@ -78,8 +75,8 @@ void MainReactor::remove_listener(int fd, CloseReason reason, int err_no)
 {
     auto it = active_listeners.find(fd);
     if(it != active_listeners.end() && it->second)
-    {// 延迟关闭,其实这里更推荐直接删掉
-        dispatch_event(ConnectionCloseEvent{fd, reason, err_no});
+    {
+        unregister_channel(fd);
         // active_listeners[fd]->deactive();
         active_listeners.erase(it);
     }
@@ -90,7 +87,8 @@ void MainReactor::reactor_fatal_event(int err_no)
     // 先停止所有listener
     std::vector<int> listeners;
     listeners.reserve(active_listeners.size());
-    for (auto &i : active_listeners)
+
+    for (const auto &i : active_listeners)
         listeners.push_back(i.first);
 
     for(int fd : listeners)
@@ -99,7 +97,7 @@ void MainReactor::reactor_fatal_event(int err_no)
     // 再停止从reactor
     for (auto &i : sub_reactors)
     {
-        i.second->dispatch_event(ReactorFatalEvent{std::this_thread::get_id(), err_no});
+        i.second->dispatch_event(ReactorFatalEvent{i.first, err_no});
     }
     for(auto& i : sub_reactor_threads)
         i.second->join();
@@ -107,29 +105,31 @@ void MainReactor::reactor_fatal_event(int err_no)
     stop_epoll(err_no);
 }
 
-void MainReactor::reactor_close_event(std::thread::id thread_id, int err_no)
+void MainReactor::reactor_close_event(uint32_t reactor_id, int err_no)
 {
-    auto it = sub_reactors.find(thread_id);
-    if(it != sub_reactors.end())
-    {
-        // 记录日志
-
-        sub_reactor_threads[thread_id]->join();
-        sub_reactors.erase(it);
-        sub_reactor_threads.erase(thread_id);
+    auto it = sub_reactors.find(reactor_id);
+    if(it == sub_reactors.end())
+        return;
         
-        round_ptr = sub_reactors.begin();
-    }
+    // 记录日志
+
+    sub_reactor_threads[reactor_id]->join();
+    sub_reactors.erase(it);
+    sub_reactor_threads.erase(reactor_id);
+    
+    round_ptr = sub_reactors.begin();
 
     if(sub_reactor_threads.empty())
     {
         // 已经没有subreactor了，因此也需要全站关闭，就地删除，不再延后
-        for(auto &i : active_listeners)
-        {
-            int fd = i.first;
-            active_listeners.erase(fd);
-            unregister_channel(fd);
-        }
+        std::vector<int> listeners;
+        listeners.reserve(active_listeners.size());
+
+        for (const auto &i : active_listeners)
+            listeners.push_back(i.first);
+
+        for(int fd : listeners)
+            remove_listener(fd, CloseReason::EPOLL_FATAL, 0);
     }
 }
 

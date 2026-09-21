@@ -1,0 +1,93 @@
+1个subreactor
+
+===== concurrency 100 =====
+Running 30s test @ http://127.0.0.1:6666/hello
+  2 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.94ms    6.41ms  89.18ms   87.80%
+    Req/Sec     7.99k    10.77k   35.99k    80.10%
+  Latency Distribution
+     50%    1.36ms
+     75%    2.18ms
+     90%   12.31ms
+     99%   30.14ms
+  462436 requests in 30.07s, 41.90MB read
+Requests/sec:  15378.12
+Transfer/sec:      1.39MB
+===== concurrency 200 =====
+Running 30s test @ http://127.0.0.1:6666/hello
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     6.31ms    9.66ms  98.76ms   88.28%
+    Req/Sec     7.90k     9.63k   34.62k    78.14%
+  Latency Distribution
+     50%    2.72ms
+     75%    4.20ms
+     90%   18.31ms
+     99%   47.60ms
+  450431 requests in 30.10s, 40.81MB read
+Requests/sec:  14966.04
+Transfer/sec:      1.36MB
+===== concurrency 500 =====
+Running 30s test @ http://127.0.0.1:6666/hello
+  2 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    15.00ms   20.62ms 267.90ms   87.80%
+    Req/Sec     7.77k     8.57k   33.94k    81.35%
+  Latency Distribution
+     50%    7.35ms
+     75%   12.85ms
+     90%   41.16ms
+     99%   97.74ms
+  429693 requests in 30.10s, 38.93MB read
+Requests/sec:  14275.52
+Transfer/sec:      1.29MB
+===== concurrency 1000 =====
+Running 30s test @ http://127.0.0.1:6666/hello
+  2 threads and 1000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    30.15ms   37.82ms 528.43ms   86.85%
+    Req/Sec     7.63k     7.59k   29.10k    80.77%
+  Latency Distribution
+     50%   16.21ms
+     75%   31.58ms
+     90%   81.62ms
+     99%  173.41ms
+  410844 requests in 30.13s, 37.22MB read
+Requests/sec:  13637.60
+Transfer/sec:      1.24MB
+===== concurrency 2000 =====
+wrk -t2 -c2000 -d30s --latency http://127.0.0.1:6666/hello
+Running 30s test @ http://127.0.0.1:6666/hello
+  2 threads and 2000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    67.21ms   73.65ms 626.70ms   85.73%
+    Req/Sec     7.35k     5.80k   29.33k    84.26%
+  Latency Distribution
+     50%   38.36ms
+     75%   85.01ms
+     90%  169.83ms
+     99%  346.46ms
+  379071 requests in 30.15s, 34.34MB read
+Requests/sec:  12574.06
+Transfer/sec:      1.14MB
+
+ss -tan state close-wait sport = :6666 | wc -l
+ls /proc/$(pgrep -n Reactor)/fd | wc -l
+1
+9
+===== concurrency 5000 =====
+wrk -t2 -c5000 -d30s --latency http://127.0.0.1:6666/hello
+Running 30s test @ http://127.0.0.1:6666/hello
+  2 threads and 5000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   195.86ms  173.65ms 936.22ms   80.42%
+    Req/Sec     5.41k     3.15k   25.25k    88.53%
+  Latency Distribution
+     50%  144.79ms
+     75%  272.97ms
+     90%  412.18ms
+     99%  909.96ms
+  288112 requests in 30.11s, 26.10MB read
+Requests/sec:   9569.07
+Transfer/sec:      0.87MB

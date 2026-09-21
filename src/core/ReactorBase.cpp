@@ -9,8 +9,11 @@ void ReactorBase::run() { loop(); }
 
 void ReactorBase::unregister_channel(int fd)
 {
-    raw_epoll_ctl(EPOLL_CTL_DEL, nullptr, fd);
-    channels.erase(fd);
+    if(fd != -1)
+    {
+        raw_epoll_ctl(EPOLL_CTL_DEL, nullptr, fd);
+        channels.erase(fd);
+    }
 }
 
 void ReactorBase::core_error(int err_no)
@@ -27,32 +30,15 @@ void ReactorBase::io_event(int fd, uint32_t events)
         it->second->handle_events(events);
 }
 
-void ReactorBase::connection_close_event(int fd, CloseReason reason, int err_no)
-{
-    unregister_channel(fd);
-    // reason 和 err_no 用于记录日志
-}
+void ReactorBase::reactor_close_event(uint32_t, int err_no) { stop_epoll(err_no); }
 
-void ReactorBase::reactor_close_event(std::thread::id thread_id, int err_no) { stop_epoll(err_no); }
-
-void ReactorBase::handle_event(const ReactorEvent &event)
+void ReactorBase::handle_event(const Event &event)
 {
     std::visit(overloaded{[this](const NewConnectionEvent &e)
                           { new_connection_event(e.connection_fd); },
                           [this](const ConnectionCloseEvent &e)
-                          { connection_close_event(e.fd, e.reason, e.err_no); },
+                          { connection_close_event(e.token, e.reason, e.err_no); },
                           [this](const ReactorFatalEvent &e)
-                          { reactor_close_event(e._id, e.err_no); }},
-               event);
-}
-
-void ReactorBase::handle_error(const ErrorEvent &event)
-{
-    std::visit(overloaded{[](const NormalEvent &e) {},
-                          [](const RetryableEvent &e) {},
-                          [this](const ConnectionCloseEvent &e)
-                          { connection_close_event(e.fd, e.reason, e.err_no); },
-                          [this](const ReactorFatalEvent &e)
-                          { reactor_fatal_event(e.err_no); }}, // 触发自己的reactor_fatal_event
+                          { reactor_close_event(e.rector_id, e.err_no); }},
                event);
 }

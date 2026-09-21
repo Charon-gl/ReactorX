@@ -39,32 +39,35 @@ http_handler::http_handler()
     parser->data = this;
 }
 
-void http_handler::bind_connection(TCPConnection* tcpconnection)
+void http_handler::on_request()
+{
+    const char* data = connection->peek();
+    size_t len = connection->readable_bytes();
+
+    if(len == 0)
+        return;
+
+    auto res = llhttp_execute(parser.get(), data, len);
+    connection->consume(len);
+
+    if(res != HPE_OK)  
+    {      // 请求非法，直接发送400并主动断开连接
+    /*
+        同on_read，要先发送完数据再关闭连接，但是无法确定能不能在发送完数据后才触发eventfd的事件(理论上这么点数据是能发完的)，
+        因此有个更好的方案是设置读事件标志位，当标志位为false时发送完数据就可以关闭连接，否则不能关闭连接  
+    */
+        response(HttpResponse{400});
+        connection->unvaild();
+    }   
+}
+
+void http_handler::bind_connection(TCPConnection* tcpconnection, std::unique_ptr<http_handler> self)
 {
     connection = tcpconnection;
 
     // tcpconnection的回调
-    connection->set_request_callback([this]{
-        static int call_cnt = 0;
-        const char* data = connection->peek();
-        size_t len = connection->readable_bytes();
-
-        if(len == 0)
-            return;
-
-        auto res = llhttp_execute(parser.get(), data, len);
-        connection->consume(len);
-        fprintf(stderr, "callback#%d len=%zu parser_state=%d\n",++call_cnt, len, llhttp_get_status_code(parser.get()));
-
-        if(res != HPE_OK)  
-        {      // 请求非法，直接发送400并主动断开连接
-        /*
-            同on_read，要先发送完数据再关闭连接，但是无法确定能不能在发送完数据后才触发eventfd的事件(理论上这么点数据是能发完的)，
-            因此有个更好的方案是设置读事件标志位，当标志位为false时发送完数据就可以关闭连接，否则不能关闭连接  
-        */
-            response(HttpResponse{400});
-            connection->unvaild();
-        }
+    connection->set_request_callback([self = std::move(self)]{
+        self->on_request();
     });
 }
 
@@ -185,5 +188,4 @@ void http_handler::set_push_request(std::function<HttpResponse(const HttpRequest
 http_handler::~http_handler()
 {
     connection = nullptr;
-    delete this;
 }

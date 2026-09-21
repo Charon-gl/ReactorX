@@ -39,15 +39,12 @@ void Channel::clear_events()
 void Channel::handle_events(uint32_t revents)
 {
     
-    if (revents & EPOLLIN && trigger_read)
+    if (revents & (EPOLLIN | EPOLLRDHUP | EPOLLHUP) && trigger_read)
         trigger_read();
     
     if (revents & EPOLLOUT && trigger_send)
         trigger_send();
         
-    if ((revents & EPOLLRDHUP || revents & EPOLLHUP) && trigger_read)
-        trigger_read();
-
     if (revents & EPOLLERR)
     {
         int err_no;

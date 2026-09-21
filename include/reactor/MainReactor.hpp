@@ -7,6 +7,7 @@
 #include "core/Channel.hpp"
 #include "net/Acceptor.hpp"
 #include "core/ReactorBase.hpp"
+#include "net/FrameWorkDispatcher.hpp"
 #include "SubReactor.hpp"
 
 #define MAX_LISTENER_NUM 10
@@ -17,27 +18,24 @@ class SubReactor;
 class MainReactor : public ReactorBase
 {
 private:
-    using sub_reactor_set = std::unordered_map<std::thread::id, std::unique_ptr<SubReactor>>;
-    
+    using sub_reactor_set = std::unordered_map<uint32_t, std::unique_ptr<SubReactor>>;
     sub_reactor_set::iterator round_ptr;
 
-    std::unordered_map<std::thread::id, std::unique_ptr<std::thread>> sub_reactor_threads;
+    // 管理的对象
+    std::unordered_map<uint32_t, std::unique_ptr<std::thread>> sub_reactor_threads;
     sub_reactor_set sub_reactors;
     std::unordered_map<int, std::unique_ptr<Acceptor>> active_listeners;
 
-    MainReactor(uint16_t port, int core_num, std::function<void(TCPConnection*)> _cb);
     
-    void add_sub_reactor(std::function<void(TCPConnection*)> _cb);
+    void add_sub_reactor(FrameWorkDispatcher& dispatcher);
     void reactor_fatal_event(int err_no) override; // 删除单个sub_reactor
-    void reactor_close_event(std::thread::id thread_id, int err_no) override;
-
+    void reactor_close_event(uint32_t reactor_id, int err_no) override;
     bool add_listener(uint16_t port);
-
     void update_round_ptr();
 
-public:
-    static MainReactor &instance(uint16_t port, int core_num, std::function<void(TCPConnection*)> _cb);
-        
+public:        
+    MainReactor(uint16_t port, int core_num, FrameWorkDispatcher& dispatcher);
+
     void remove_listener(int fd, CloseReason reason, int err_no);
     // 轮询分发
     void round_dispatch(int fd);

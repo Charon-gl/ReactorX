@@ -4,15 +4,15 @@
 #include <thread>
 #include <variant>
 #include <type_traits>
+#include <string>
+#include "net/ConnectionToken.hpp"
 #include "utils/Err_Manager.hpp"
 
-struct NewConnectionEvent
-{
-    int connection_fd;
-};
+
 
 enum class CloseReason
 {
+    // 框架层
     NORMAL_ACTIVE,
     PEER_DISCONNECT,
     IO_ERROR,
@@ -20,16 +20,48 @@ enum class CloseReason
     EPOLL_FATAL
 };
 
-struct ConnectionCloseEvent     // 关闭业务连接 (cfd)
+
+// BusinessEvent
+struct Request         // 连接的读缓冲区数据，传给上层业务
 {
-    int fd;
+    ConnectionToken token;
+    std::string data;
+};
+
+struct Response_Command         // 上层业务生成的响应，传给反应堆发送
+{
+    ConnectionToken token;
+    std::string data;
+};
+
+struct Close_Command        // 上层业务主动关闭连接
+{
+    ConnectionToken token;
+};
+
+struct Reactor_Command
+{
+    std::variant<Response_Command, Close_Command> payload;
+};
+
+
+// ReactorEvent
+struct NewConnectionEvent
+{
+    int connection_fd;
+};
+
+struct ConnectionCloseEvent     // 关闭业务连接 (cfd)，所有来源的关闭都要从这里进入
+{
+    //int fd;
+    ConnectionToken token;
     CloseReason reason;
     int err_no;
 };
 
 struct ReactorFatalEvent        // Reactor 发起关闭事件
 {
-    std::thread::id _id;
+    uint32_t rector_id;
     int err_no;
 };
 
@@ -39,25 +71,11 @@ struct LogEvent
     std::string content;
 };
 
-using ReactorEvent = std::variant<
+using Event = std::variant<
     NewConnectionEvent,
     ConnectionCloseEvent,
     ReactorFatalEvent
     // LogEvent
->;
-
-
-//ErrorEvent
-struct RetryableEvent {};
-
-struct NormalEvent {};
-
-
-using ErrorEvent = std::variant<
-    RetryableEvent,
-    NormalEvent,
-    ConnectionCloseEvent,
-    ReactorFatalEvent
 >;
 
 
@@ -77,18 +95,3 @@ inline CloseReason get_reason(int err_no)
     }
 }
 
-
-inline ErrorEvent error_event_package(int err_no, Err_Rank err_rank, int fd = -1)
-{
-    switch (err_rank)
-    {
-    case Err_Rank::IGNORE:
-        return NormalEvent{};
-    case Err_Rank::RETRY:
-        return RetryableEvent{};
-    case Err_Rank::CLOSE_CONNECTION:
-        return ConnectionCloseEvent{fd, get_reason(err_no), err_no};
-    case Err_Rank::FATAL:
-        return ReactorFatalEvent{std::this_thread::get_id(), err_no};
-    }
-}

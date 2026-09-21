@@ -29,10 +29,9 @@ public:
     bool on_error(int err_no) override;
     void on_close(int err_no = 0) override;
 
-    bool active(uint16_t port);      // 激活acceptor
+    std::unique_ptr<Channel> active(uint16_t port);      // 激活acceptor
     void deactive();       // 重置acceptor
 
-    
     Acceptor(Acceptor &&) = delete;
     Acceptor &operator=(Acceptor &&) = delete;
     Acceptor(const Acceptor &) = delete;

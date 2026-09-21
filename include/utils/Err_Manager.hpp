@@ -5,7 +5,6 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <functional>
-#include <variant>
 
 enum class Err_Rank
 {
@@ -18,7 +17,6 @@ enum class Err_Rank
 class Err_Manager
 {
 public:
-
     Err_Manager(const Err_Manager &) = delete;
     Err_Manager(Err_Manager &&) = delete;
 

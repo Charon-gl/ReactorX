@@ -6,22 +6,24 @@ Acceptor::Acceptor(MainReactor* mainreactor) : IO_Object(mainreactor), port(0)
     memset(&addr, 0, sizeof(addr));
 }
 
-bool Acceptor::active(uint16_t port_)
+std::unique_ptr<Channel> Acceptor::active(uint16_t port_)
 {
     port = port_;
-    fd = init_listen_fd();
+    int fd = init_listen_fd();
     if(fd == -1)
-        return false;
+        return nullptr;
 
-    activate_impl(fd);
+    auto it = std::make_unique<Channel>(fd);
 
-    return true;
+    activate_impl(it.get());
+
+    return std::move(it);
 }
 
 void Acceptor::deactive()
 {
     memset(&addr, 0, sizeof(addr));
-    deactive_impl(fd);
+    deactive_impl();
 }
 
 int Acceptor::init_listen_fd()
@@ -67,7 +69,7 @@ void Acceptor::on_read()
 
     while (true)
     {
-        int cfd = accept(fd, reinterpret_cast<sockaddr*>(&caddr), &len);
+        int cfd = accept(channel->get_fd(), reinterpret_cast<sockaddr*>(&caddr), &len);
         if (cfd == -1)
         {
             bool res = on_error(errno);
@@ -75,7 +77,7 @@ void Acceptor::on_read()
                 break;
         }
         // 投递新连接
-        static_cast<MainReactor*>(reactor())->round_dispatch(cfd); // 可以考虑扩展成批量投递
+        static_cast<MainReactor*>(reactor)->round_dispatch(cfd); // 可以考虑扩展成批量投递
     }
 }
 
@@ -98,8 +100,7 @@ bool Acceptor::on_error(int err_no)
 
 void Acceptor::on_close(int err_no)
 {
-    unvaild();
-    static_cast<MainReactor*>(reactor())->remove_listener(fd, get_reason(err_no), err_no);
+    static_cast<MainReactor*>(reactor)->remove_listener(channel->get_fd(), get_reason(err_no), err_no);
 }
 
 Acceptor::~Acceptor()

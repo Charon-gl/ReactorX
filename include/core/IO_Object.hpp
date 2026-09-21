@@ -5,19 +5,12 @@
 
 class IO_Object
 {
-private:
-    ReactorBase *_reactor;
-    Channel *channel;
-    bool is_active;
-
 protected:
-    void activate_impl(int fd);
-    void deactive_impl(int fd);
+    ReactorBase *reactor;
+    Channel *channel;
 
-    int fd;
-    ReactorBase *reactor() const noexcept;
-
-    void disable_event(uint32_t event);
+    void activate_impl(Channel* channel_);
+    void deactive_impl();
     
     virtual void on_read() {}
     virtual void on_send() {}
@@ -25,11 +18,7 @@ protected:
     virtual void on_close(int err_no = 0) {}
     
 public:
-    IO_Object(ReactorBase* reactor);
+    IO_Object(ReactorBase* reactor_);
 
-    void unvaild();       // 将channel的is_heard设为false，并注销读监听
-    bool is_vaild() const;        // 返回channel的vaild值
-
-    int get_fd() const;
-    void enable_event(uint32_t event);
+    virtual ~IO_Object() = default;
 };
