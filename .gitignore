@@ -76,6 +76,9 @@ Log/
 __pycache__/
 *.pyc
 
+# llhttp 生成产物
+libllhttp.pc
+
 # others
 .codebuddy/
 .vscode/
