@@ -3,6 +3,8 @@
 #include "core/EventLoop.hpp"
 #include "utils/Err_Manager.hpp"
 
+thread_local EventLoop* EventLoop::tls_loop = nullptr;
+
 EventLoop::EventLoop()
     : is_stop(false), fatal_errno(0)
 {
@@ -50,6 +52,7 @@ void EventLoop::read_wakeup()
 
 void EventLoop::loop()
 {
+    tls_loop = this;
     while (!is_stop)
     {
         int nums_fd = epoll_wait(epfd, evs.data(), evs.size(), -1);
@@ -66,6 +69,8 @@ void EventLoop::loop()
                 io_event(fd, evs[i].events);
         }
     }
+
+    tls_loop = nullptr;
 }
 
 bool EventLoop::raw_epoll_ctl(int op, epoll_event *ev, int fd)
@@ -102,8 +107,11 @@ void EventLoop::run_all_tasks()
 
 void EventLoop::stop_epoll(int err_no)
 {
-    is_stop = true;
-    fatal_errno = err_no;
+    if(!is_stop)
+    {
+        is_stop = true;     // 标志位为true，epoll_loop在当前轮执行完后停止
+        fatal_errno = err_no;
+    }
 }
 
 EventLoop::~EventLoop()

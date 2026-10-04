@@ -22,28 +22,27 @@ class Channel
 private:
     int fd;
     uint32_t events;
-    int _errno;
-    std::atomic<bool> valid;        //标志位，true表示fd有效
     std::function<void(Channel*)> update_events;
 
     std::function<void()> trigger_read;
     std::function<void()> trigger_send;
     std::function<void(int)> trigger_error;
-
+    
 public:
-    Channel(int);
-
+    Channel(int fd_ = -1, uint32_t events_ = 0);
+    
     void handle_events(uint32_t); // 接收来自epoll的事件，并传给业务层
-
+    
     void enable_events(uint32_t tar_events);
     void disable_events(uint32_t tar_events);
     void clear_events();
     
     int get_fd() const;
     u_int32_t get_events() const;
-
-    bool get_vaild() const;
-    void unvaild();     // 设vaild为false，并注销读监听
+    
+    void activate(int fd, uint32_t events_);
+        
+    void deactivate();
 
     void set_read_cb(std::function<void()> _cb);
     void set_send_cb(std::function<void()> _cb);

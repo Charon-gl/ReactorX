@@ -6,28 +6,9 @@ Acceptor::Acceptor(MainReactor* mainreactor) : IO_Object(mainreactor), port(0)
     memset(&addr, 0, sizeof(addr));
 }
 
-std::unique_ptr<Channel> Acceptor::active(uint16_t port_)
+int Acceptor::init_listen_fd(uint16_t port_)
 {
-    port = port_;
-    int fd = init_listen_fd();
-    if(fd == -1)
-        return nullptr;
 
-    auto it = std::make_unique<Channel>(fd);
-
-    activate_impl(it.get());
-
-    return std::move(it);
-}
-
-void Acceptor::deactive()
-{
-    memset(&addr, 0, sizeof(addr));
-    deactive_impl();
-}
-
-int Acceptor::init_listen_fd()
-{
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     if (lfd == -1)
     {
@@ -35,6 +16,7 @@ int Acceptor::init_listen_fd()
         return -1;
     }
 
+    port = port_;
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
@@ -47,7 +29,7 @@ int Acceptor::init_listen_fd()
         return -1;
     }
 
-    ret = listen(lfd, MAX_LISTEN_NUM);
+    ret = listen(lfd, SOMAXCONN);
     if (ret == -1)
     {
         std::cerr << "Listen failed" << std::endl;
@@ -61,20 +43,43 @@ int Acceptor::init_listen_fd()
     return lfd;
 }
 
+void Acceptor::activate(Channel* channel)
+{
+    channel->set_read_cb([this]{
+        on_read();
+    });
+    channel->set_send_cb([this]{
+        on_send();
+    });
+    channel->set_error_cb([this](int err_no){
+        on_error(err_no);
+    });
+
+    activate_impl(channel);
+}
+
+void Acceptor::deactivate()
+{
+    memset(&addr, 0, sizeof(addr));
+    deactivate_impl();
+}
+
 void Acceptor::on_read()
 {
     sockaddr_in caddr;
     memset(&caddr, 0, sizeof(caddr));
-    socklen_t len = sizeof(caddr);
-
+    
     while (true)
     {
+        socklen_t len = sizeof(caddr);
         int cfd = accept(channel->get_fd(), reinterpret_cast<sockaddr*>(&caddr), &len);
         if (cfd == -1)
         {
             bool res = on_error(errno);
-            if(!res)
-                break;
+            if(res)    // EINTR
+                continue;       // 冷处理则会把-1当成新连接传给subreactor
+                
+            break;
         }
         // 投递新连接
         static_cast<MainReactor*>(reactor)->round_dispatch(cfd); // 可以考虑扩展成批量投递
@@ -86,7 +91,7 @@ bool Acceptor::on_error(int err_no)
     auto err_rank = Err_Manager::err_judge(err_no);
     switch (err_rank)
     {
-    case Err_Rank::RETRY: // 非阻塞io不会EINTR，这里直接忽略即可
+    case Err_Rank::RETRY:
         return true;
     case Err_Rank::IGNORE:
         break;
@@ -105,5 +110,5 @@ void Acceptor::on_close(int err_no)
 
 Acceptor::~Acceptor()
 {
-    deactive();
+    deactivate();
 }

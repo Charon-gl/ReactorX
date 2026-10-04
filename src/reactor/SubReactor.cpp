@@ -1,15 +1,14 @@
 #include "reactor/SubReactor.hpp"
-#include "net/FrameWorkDispatcher.hpp"
+#include "net/Dispatcher.hpp"
 
 Slot::Slot(uint32_t no, ConnectionInit content)
-    : no(no), fd(-1), active(false)
+    : no(no), active(false)
 {
     connection = std::make_unique<TCPConnection>(content.reactor, std::move(content._cb));
 }
 
 void Slot::register_connection(uint32_t reactor_id, Channel* channel)
 {
-    fd = channel->get_fd();
     generations.inc();
     connection->activate(channel, ConnectionToken{reactor_id, no, generations.get()});
     active = true;
@@ -17,7 +16,6 @@ void Slot::register_connection(uint32_t reactor_id, Channel* channel)
 
 void Slot::unregister_connection()
 {
-    fd = -1;
     connection->deactivate();
     active = false;
 }
@@ -25,13 +23,13 @@ void Slot::unregister_connection()
 
 /*-----------------SubReactor-----------------*/
 
-SubReactor::SubReactor(uint32_t reactor_id, FrameWorkDispatcher& dispatcher)
+SubReactor::SubReactor(uint32_t reactor_id, Dispatcher& dispatcher)
     : dispatcher(dispatcher), reactor_id(reactor_id)
 {
     slots.reserve(INIT_CONNECTION_NUM);
     // 注册分发器端口
-    dispatcher.register_reactor_port(reactor_id, [this](Reactor_Command task){
-        dispatch_command(task);
+    dispatcher.register_reactor_port(reactor_id, [this](Operation operation){
+        dispatch_operation(operation);
     });
 
     create_slots();   
@@ -44,8 +42,8 @@ void SubReactor::create_slots()
     {
         auto it = std::make_unique<Slot>(reactor_counter.get(), 
             ConnectionInit{this, 
-                [this](Request task){
-                    dispatcher.publish_request(task);
+                [this](ByteStream stream){
+                    dispatcher.publish_stream(stream);
                 }
             }
         );
@@ -58,7 +56,7 @@ void SubReactor::create_slots()
 
 void SubReactor::new_connection_event(int fd)
 {
-    auto channel = std::make_unique<Channel>(fd);
+    auto channel = try_get_channel(fd);
 
     if(free_slots.empty())
         create_slots();
@@ -68,9 +66,8 @@ void SubReactor::new_connection_event(int fd)
 
     auto slot = slots.find(free_slot);
     if(slot != slots.end())     // 找不到说明出错了，因为slots和free_slots是同步创建的
-        slot->second->register_connection(reactor_id, channel.get());   
+        slot->second->register_connection(reactor_id, channel);   
     
-    register_channel(std::move(channel));
 }
 
 void SubReactor::connection_close_event(const ConnectionToken& token, const CloseReason& reason, int err_no)
@@ -78,20 +75,23 @@ void SubReactor::connection_close_event(const ConnectionToken& token, const Clos
     auto slot = validate(token);
     if(slot.first)
     {
-        int fd = slot.second->second->fd;
+        int fd = slot.second->second->connection->get_channel()->get_fd();
         slot.second->second->unregister_connection();
-        unregister_channel(fd);
+        
         free_slots.push(slot.second->first);
+        unregister_channel(fd);
+    
+        dispatcher.publish_close(token);
     }
 }
 
-void SubReactor::reactor_fatal_event(int err_no)
+void SubReactor::reactor_fatal_event()
 {
-    stop_epoll(err_no);
     dispatcher.unregister_reactor_port(reactor_id);
+    call_main_reactor(ReactorFatalEvent{reactor_id, fatal_errno});
 }
 
-void SubReactor::response_command(const ConnectionToken& token, std::string data)
+void SubReactor::send_operation(const ConnectionToken& token, std::string data)
 {
     auto plot = validate(token);
     if(plot.first)
@@ -101,30 +101,30 @@ void SubReactor::response_command(const ConnectionToken& token, std::string data
     }
 }
 
-void SubReactor::close_command(const ConnectionToken& token)
+void SubReactor::close_operation(const ConnectionToken& token)
 {
-    auto plot = validate(token);
-    if(plot.first)
+    auto it = validate(token);
+    if(it.first)
     {
-        auto it = std::move(plot.second);
-        it->second->connection->to_close();
+        auto plot = std::move(it.second);
+        plot->second->connection->to_close();
     }
 }
 
-void SubReactor::handle_command(Reactor_Command command)
+void SubReactor::handle_operation(Operation operation)
 {
     std::visit(overloaded{
-        [this](const Response_Command& c)
-        { response_command(c.token, c.data); },
-        [this](const Close_Command& c)
-        { close_command(c.token); }
-    }, command.payload);
+        [this](const Send_Operation& op)
+        { send_operation(op.token, op.data); },
+        [this](const Close_Operation& op)
+        { close_operation(op.token); }
+    }, operation.payload);
 }
 
-void SubReactor::dispatch_command(Reactor_Command command)
+void SubReactor::dispatch_operation(Operation operation)
 {
-    run_in_loop([this, command = std::move(command)] {
-        handle_command(std::move(command));
+    run_in_loop([this, operation = std::move(operation)] {
+        handle_operation(std::move(operation));
     });
 }
 
@@ -140,8 +140,3 @@ SubReactor::target_slot SubReactor::validate(const ConnectionToken& token)
 }
 
 void SubReactor::set_call_main_reactor(std::function<void(const ReactorFatalEvent&)> _cb) { call_main_reactor = std::move(_cb); }
-
-SubReactor::~SubReactor()
-{
-    call_main_reactor(ReactorFatalEvent{reactor_id, fatal_errno});
-}

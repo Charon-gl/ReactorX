@@ -9,22 +9,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -fno-omit-frame-pointer")
 set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address")
 
-# 源文件
+# 框架源文件：只编译框架本身（core/net/reactor/utils），不含任何 demo/HTTP/业务代码
 file(GLOB_RECURSE FRAMEWORK_SRC CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/src/*.cpp)
-#file(GLOB_RECURSE PROTOCOL_SRC  CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/protocol/*.cpp)
-file(GLOB_RECURSE APP_SRC       CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/app/main.cpp)
 
-add_executable(Reactor ${FRAMEWORK_SRC} ${PROTOCOL_SRC} ${APP_SRC})
+# 框架编译成静态库，供上层业务链接使用
+add_library(ReactorX STATIC ${FRAMEWORK_SRC})
 
-# 头文件
-target_include_directories(Reactor PRIVATE 
-    ${PROJECT_SOURCE_DIR}/include
-    #${PROJECT_SOURCE_DIR}/protocol
-    #${PROJECT_SOURCE_DIR}/app
-    #${PROJECT_SOURCE_DIR}/llhttp/include
-)
+target_include_directories(ReactorX PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
-# # llhttp 静态库
-# set(LLHTTP_BUILD_STATIC ON CACHE BOOL "" FORCE)
-# add_subdirectory(llhttp)
-# target_link_libraries(Reactor PRIVATE llhttp::llhttp)
+# 若存在 benchmark 目录（仅测试/演示分支），额外编译 HTTP 演示服务器
+if(EXISTS ${PROJECT_SOURCE_DIR}/benchmark/CMakeLists.txt)
+    add_subdirectory(benchmark)
+endif()

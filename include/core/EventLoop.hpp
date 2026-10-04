@@ -15,6 +15,7 @@
 class EventLoop // 该类主要实现Reactor的通信逻辑，如何传递信息/任务以及如何执行
 {
 private:
+    static thread_local EventLoop* tls_loop;        // 保存eventloop所在线程的信息
     int epfd;
     int event_fd;
     std::vector<epoll_event> evs;
@@ -33,6 +34,11 @@ protected:
     template <typename Event>
     void run_in_loop(Event &&event) // 跨线程传递任务
     {
+        if(tls_loop == this)        // 在同一线程，直接执行，不存到队列延迟
+        {
+            event();
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(mtx);
             task_queue.emplace(std::forward<Event>(event));
@@ -46,8 +52,8 @@ protected:
     virtual void io_event(int fd, uint32_t events) {};     // epoll事件分发
     void stop_epoll(int err_no = 0);
 
-    int get_epfd() const noexcept;
-    int get_event_fd() const noexcept;
+    int get_epfd() const noexcept { return epfd; };
+    int get_event_fd() const noexcept { return event_fd; };
 
     ~EventLoop();
 };

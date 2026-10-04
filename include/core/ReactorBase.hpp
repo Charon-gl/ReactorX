@@ -37,9 +37,24 @@ public:
         });
     }
 
-    template <typename T>
-    void register_channel(T &&channel)
-    {
+    
+    Channel* try_get_channel(int fd)
+    {// fd直接作为key，若找不到则创建一个channel
+        uint32_t events = EPOLLET | EPOLLIN | EPOLLRDHUP;
+        
+        auto it = channels.find(fd);
+        if(it != channels.end())
+        {
+            it->second->activate(fd, events);
+            epoll_event ev;
+            ev.data.fd = fd;
+            ev.events = events;          // 注册事件在activate()完成
+            raw_epoll_ctl(EPOLL_CTL_ADD, &ev, fd);   // 加入到epoll实例
+
+            return it->second.get();
+        }
+        
+        auto channel = std::make_unique<Channel>();
         channel->set_update_events([this](Channel* channel) { 
             int fd = channel->get_fd();
             epoll_event ev;
@@ -49,20 +64,16 @@ public:
             raw_epoll_ctl(EPOLL_CTL_MOD, &ev, fd); 
         });
 
-        int fd = channel->get_fd();
+        channel->activate(fd, events);
         epoll_event ev;
         ev.data.fd = fd;
-        ev.events = channel->get_events();
-        while (true)        // 加入到epoll实例
-        {
-            bool res = raw_epoll_ctl(EPOLL_CTL_ADD, &ev, fd);
-            if (!res)
-                return;
-            break;
-        }
+        ev.events = events;          // 注册事件在activate()完成
+        raw_epoll_ctl(EPOLL_CTL_ADD, &ev, fd);        // 加入到epoll实例
 
-        channel->enable_events(EPOLLIN | EPOLLRDHUP);   // epollrdhup的处理入口都是trigger_read()，因此就算是listenfd注册了也无伤大雅
-        channels.emplace(fd, std::forward<T>(channel));
+        Channel* raw_channel = channel.get();
+        channels.emplace(fd, std::move(channel));
+
+        return raw_channel;
     }
 
     void unregister_channel(int fd);
@@ -77,8 +88,8 @@ private:
 
     virtual void connection_close_event(const ConnectionToken& token, const CloseReason& reason, int err_no) {}
     virtual void new_connection_event(int fd) {}
-    virtual void reactor_fatal_event(int err_no) = 0; // epollfd出错，需要整个reactor关闭
-    virtual void reactor_close_event(uint32_t, int err_no);
+    virtual void reactor_fatal_event() = 0;         // epollfd出错，需要整个reactor关闭
+    virtual void reactor_close_event(uint32_t reactor_id, int err_no);
     // virtual void on_log_event(int level, std::string content) {}
 
     std::unordered_map<int, std::unique_ptr<Channel>> channels; // 存储业务channel

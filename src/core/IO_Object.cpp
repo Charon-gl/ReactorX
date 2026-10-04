@@ -18,7 +18,7 @@ void IO_Object::activate_impl(Channel* channel_)
     });
 }
 
-void IO_Object::deactive_impl()
+void IO_Object::deactivate_impl()
 {
     channel = nullptr;
 }

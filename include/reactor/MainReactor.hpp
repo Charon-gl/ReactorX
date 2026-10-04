@@ -7,7 +7,7 @@
 #include "core/Channel.hpp"
 #include "net/Acceptor.hpp"
 #include "core/ReactorBase.hpp"
-#include "net/FrameWorkDispatcher.hpp"
+#include "net/Dispatcher.hpp"
 #include "SubReactor.hpp"
 
 #define MAX_LISTENER_NUM 10
@@ -27,14 +27,14 @@ private:
     std::unordered_map<int, std::unique_ptr<Acceptor>> active_listeners;
 
     
-    void add_sub_reactor(FrameWorkDispatcher& dispatcher);
-    void reactor_fatal_event(int err_no) override; // 删除单个sub_reactor
+    void add_sub_reactor(Dispatcher& dispatcher);
+    void reactor_fatal_event() override; // 删除单个sub_reactor
     void reactor_close_event(uint32_t reactor_id, int err_no) override;
     bool add_listener(uint16_t port);
     void update_round_ptr();
 
 public:        
-    MainReactor(uint16_t port, int core_num, FrameWorkDispatcher& dispatcher);
+    explicit MainReactor(uint16_t port, int core_num, Dispatcher& dispatcher);
 
     void remove_listener(int fd, CloseReason reason, int err_no);
     // 轮询分发

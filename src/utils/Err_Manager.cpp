@@ -6,7 +6,7 @@ Err_Rank Err_Manager::err_judge(int err_no)
     {
     case EAGAIN:
     case ECONNABORTED:
-    // case EMFILE:
+    case EMFILE:
     case EEXIST:
         return Err_Rank::IGNORE;
 

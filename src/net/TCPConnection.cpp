@@ -14,17 +14,16 @@ bool is_valid_transition(Conn_state cur_state, Conn_state new_state)        //�
     return transition_table[cur_state].count(new_state);
 }
 
-TCPConnection::TCPConnection(SubReactor* reactor, std::function<void(Request)> request_callback) 
+TCPConnection::TCPConnection(SubReactor* reactor, std::function<void(ByteStream)> request_callback) 
         : IO_Object{reactor},
             token(ConnectionToken{}),
             send_begin_pos(0),
             state{Conn_state::UNCONNECT},
-            close_event_sent(false)
+            close_event_sent(false),
+            submit_request(std::move(request_callback))
 {    
     recv_buf.reserve(MAX_BUF_SIZE);
     send_buf.reserve(MAX_BUF_SIZE);
-
-    set_request_submit(std::move(request_callback));
 }
 
 bool TCPConnection::transition(Conn_state new_state)
@@ -49,6 +48,7 @@ void TCPConnection::on_read()
         size_t n = recv_buf.size();
         recv_buf.resize(n + MAX_BUF_SIZE);
         int res = read(fd, recv_buf.data() + n, recv_buf.capacity() - n);
+
         if(res == 0)
         {   // 正处于processing态，关闭读监听，继续后面的流程；
             // 处于connected状态，可以走关闭流程
@@ -64,7 +64,10 @@ void TCPConnection::on_read()
             return;
         }
         else if (res == -1)
-        {
+        {// 这里显示判断一下EAGAIN或EINTR
+            if(errno == EINTR)
+                continue;
+
             recv_buf.resize(n);
             bool res = on_error(errno);
             if(!res)
@@ -80,8 +83,8 @@ void TCPConnection::on_read()
     data.reserve(MAX_BUF_SIZE);
     swap(data, recv_buf);
     
-    submit_request(Request{token, std::move(data)});
     request_count.inc();        // 请求数量+1
+    submit_request(ByteStream{token, std::move(data)});
     return;
 }
 
@@ -93,15 +96,14 @@ void TCPConnection::on_send()
     int fd = channel->get_fd();
     while (send_begin_pos < send_buf.size())
     {
-        int res = send(
-            fd,
-            send_buf.data() + send_begin_pos,
-            send_buf.size() - send_begin_pos,
-            0);
+        int res = send(fd, send_buf.data() + send_begin_pos, 
+            send_buf.size() - send_begin_pos, MSG_NOSIGNAL);   //MSG_NOSIGNAL当给已断开的tcp连接发送数据时，不会发出SIGPIPE杀死整个进程
         if(res > 0)
             send_begin_pos += res;
         else if(res < 0)
         {
+            if(errno == EINTR)
+                continue;
             on_error(errno);
             return;
         }
@@ -123,12 +125,11 @@ bool TCPConnection::on_error(int err_no)
     switch (err_rank)
     {
     case Err_Rank::IGNORE:
-    case Err_Rank::RETRY:       // 非阻塞io不会EINTR，这里直接忽略即可
+    case Err_Rank::RETRY:
         return false;
     default:
-        channel->disable_events(EPOLLIN);
-        transition(Conn_state::CLOSING);
         on_close(err_no);
+        break;
     }
     return true;
 }
@@ -140,8 +141,9 @@ void TCPConnection::on_close(int err_no)
 
     close_event_sent = true;
     transition(Conn_state::CLOSING);
-    channel->disable_events(EPOLLIN | EPOLLRDHUP);
+    channel->clear_events();
     shutdown(channel->get_fd(), SHUT_WR);
+
     CloseReason res = get_reason(err_no);
     static_cast<SubReactor*>(reactor)->dispatch_event(ConnectionCloseEvent{token, res, err_no});
 }
@@ -164,7 +166,7 @@ void TCPConnection::deactivate()
     send_buf.clear();
     send_begin_pos = 0;
     
-    deactive_impl();
+    deactivate_impl();
     transition(Conn_state::UNCONNECT);
 }
 

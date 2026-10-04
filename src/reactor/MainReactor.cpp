@@ -6,7 +6,7 @@
 
 
 /*-------------MainReactor--------------*/
-MainReactor::MainReactor(uint16_t port, int core_num, FrameWorkDispatcher& dispatcher)
+MainReactor::MainReactor(uint16_t port, int core_num, Dispatcher& dispatcher)
 {
     sub_reactor_threads.reserve(core_num);
     sub_reactors.reserve(core_num);
@@ -39,7 +39,7 @@ void MainReactor::update_round_ptr()
         round_ptr = sub_reactors.begin();
 }
 
-void MainReactor::add_sub_reactor(FrameWorkDispatcher& dispatcher)
+void MainReactor::add_sub_reactor(Dispatcher& dispatcher)
 {
     uint32_t num = reactor_counter.get();
     auto subreactor = std::make_unique<SubReactor>(num, dispatcher);
@@ -49,7 +49,6 @@ void MainReactor::add_sub_reactor(FrameWorkDispatcher& dispatcher)
     std::thread t([subreactor = subreactor.get()] { 
         subreactor->run(); 
     });
-    
     
     sub_reactor_threads.emplace(num, std::make_unique<std::thread>(std::move(t)));
     sub_reactors.emplace(num, std::move(subreactor));
@@ -61,12 +60,13 @@ bool MainReactor::add_listener(uint16_t port)
 {
     // 初始化,然后加入active_listeners
     auto acceptor = std::make_unique<Acceptor>(this);
-    auto channel = acceptor->active(port);
-    if(channel == nullptr)
+    int lfd  = acceptor->init_listen_fd(port);
+    if(lfd == -1) 
         return false;
 
-    active_listeners.emplace(channel->get_fd(), std::move(acceptor));
-    register_channel(std::move(channel));
+    auto channel = try_get_channel(lfd);
+    acceptor->activate(channel);
+    active_listeners.emplace(lfd, std::move(acceptor));
 
     return true;
 }
@@ -77,32 +77,11 @@ void MainReactor::remove_listener(int fd, CloseReason reason, int err_no)
     if(it != active_listeners.end() && it->second)
     {
         unregister_channel(fd);
-        // active_listeners[fd]->deactive();
         active_listeners.erase(it);
     }
-}
 
-void MainReactor::reactor_fatal_event(int err_no)
-{
-    // 先停止所有listener
-    std::vector<int> listeners;
-    listeners.reserve(active_listeners.size());
-
-    for (const auto &i : active_listeners)
-        listeners.push_back(i.first);
-
-    for(int fd : listeners)
-        remove_listener(fd, CloseReason::EPOLL_FATAL, 0);
-
-    // 再停止从reactor
-    for (auto &i : sub_reactors)
-    {
-        i.second->dispatch_event(ReactorFatalEvent{i.first, err_no});
-    }
-    for(auto& i : sub_reactor_threads)
-        i.second->join();
-
-    stop_epoll(err_no);
+    if(active_listeners.empty())        // 已经没有acceptor了，程序退出，若是调用自reactor_fatal_event，则stop_epoll不会改变fatal_error
+        stop_epoll(); 
 }
 
 void MainReactor::reactor_close_event(uint32_t reactor_id, int err_no)
@@ -119,23 +98,42 @@ void MainReactor::reactor_close_event(uint32_t reactor_id, int err_no)
     
     round_ptr = sub_reactors.begin();
 
-    if(sub_reactor_threads.empty())
+    if(sub_reactor_threads.empty())         // 已经没有subreactor了，因此也需要全站关闭
     {
-        // 已经没有subreactor了，因此也需要全站关闭，就地删除，不再延后
-        std::vector<int> listeners;
-        listeners.reserve(active_listeners.size());
-
-        for (const auto &i : active_listeners)
-            listeners.push_back(i.first);
-
-        for(int fd : listeners)
-            remove_listener(fd, CloseReason::EPOLL_FATAL, 0);
+        stop_epoll();
     }
 }
 
-MainReactor::~MainReactor()
+void MainReactor::reactor_fatal_event()
 {
+    // 先停止所有listener
+    if(!active_listeners.empty())
+    {
+        std::vector<int> listeners;
+        listeners.reserve(active_listeners.size());
+    
+        for (const auto &i : active_listeners)
+            listeners.push_back(i.first);
+    
+        for(int fd : listeners)
+            remove_listener(fd, CloseReason::EPOLL_FATAL, fatal_errno);
+    }
+
+    // 再停止从reactor
+    for (auto &i : sub_reactors)
+    {
+        i.second->dispatch_event(ReactorFatalEvent{i.first, fatal_errno});
+    }
+    for(auto& i : sub_reactor_threads)
+        i.second->join();
+
     sub_reactors.clear();
     sub_reactor_threads.clear();
+}
+
+
+MainReactor::~MainReactor()
+{
+    reactor_fatal_event();      // 若是mainreator因为acceptor或subreactor耗尽导致的全站关闭，则会从这里进行资源回收
 }
 

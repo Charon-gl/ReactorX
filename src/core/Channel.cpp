@@ -1,11 +1,7 @@
 #include "core/Channel.hpp"
 
-Channel::Channel(int _fd) 
-    : fd(_fd), events(EPOLLET), valid(true)
-{
-    int flag = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, flag | O_NONBLOCK);
-}
+Channel::Channel(int _fd, uint32_t events_) 
+    : fd(_fd), events(events_) {}
 
 void Channel::enable_events(uint32_t tar_events)
 {
@@ -38,35 +34,44 @@ void Channel::clear_events()
 
 void Channel::handle_events(uint32_t revents)
 {
-    
     if (revents & (EPOLLIN | EPOLLRDHUP | EPOLLHUP) && trigger_read)
         trigger_read();
     
     if (revents & EPOLLOUT && trigger_send)
         trigger_send();
         
-    if (revents & EPOLLERR)
+    if (revents & EPOLLERR && trigger_error)
     {
         int err_no;
         socklen_t len = sizeof(err_no);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err_no, &len);
         
-        if(trigger_error)
-            trigger_error(err_no);
+        trigger_error(err_no);
     }
 }
 
 int Channel::get_fd() const { return fd; }
 uint32_t Channel::get_events() const { return events; }
 
-bool Channel::get_vaild() const { return valid.load(std::memory_order_seq_cst); }
-void Channel::unvaild()
+void Channel::activate(int fd_, uint32_t events_)
 {
-    auto res = valid.load(std::memory_order_seq_cst);
-    if(res)
+    fd = fd_;
+    events = events_;
+    int flag = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, flag | O_NONBLOCK);
+}
+
+void Channel::deactivate()
+{
+    trigger_read = nullptr;
+    trigger_send = nullptr;
+    trigger_error = nullptr;
+
+    events = 0;
+    if(fd != -1)
     {
-        valid.store(false);
-        disable_events(EPOLLIN);
+        close(fd);
+        fd = -1;
     }
 }
 
@@ -77,7 +82,6 @@ void Channel::set_update_events(std::function<void(Channel*)> _cb) { update_even
 
 Channel::~Channel()
 {
-    if(fd != -1)
-        close(fd);
-    fd = -1;
+    update_events = nullptr;
+    deactivate();
 }

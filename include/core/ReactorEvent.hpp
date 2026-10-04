@@ -22,26 +22,26 @@ enum class CloseReason
 
 
 // BusinessEvent
-struct Request         // 连接的读缓冲区数据，传给上层业务
+struct ByteStream         // 连接的单次数据流，传给上层业务
 {
     ConnectionToken token;
     std::string data;
 };
 
-struct Response_Command         // 上层业务生成的响应，传给反应堆发送
+struct Send_Operation         // 上层业务生成的响应，传回给反应堆发送
 {
     ConnectionToken token;
     std::string data;
 };
 
-struct Close_Command        // 上层业务主动关闭连接
+struct Close_Operation        // 上层业务主动关闭连接
 {
     ConnectionToken token;
 };
 
-struct Reactor_Command
+struct Operation
 {
-    std::variant<Response_Command, Close_Command> payload;
+    std::variant<Send_Operation, Close_Operation> payload;
 };
 
 

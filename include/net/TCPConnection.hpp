@@ -26,7 +26,7 @@ class SubReactor;
 struct ConnectionInit
 {
     SubReactor* reactor;
-    std::function<void(Request)> _cb;
+    std::function<void(ByteStream)> _cb;
 };
 
 class TCPConnection : public IO_Object
@@ -49,19 +49,16 @@ private:
     bool on_error(int) override;
     void on_close(int err_no = 0) override;     // 框架层触发关闭
     
-    std::function<void(Request)> submit_request;        // 提交请求
+    std::function<void(ByteStream)> submit_request;        // 提交请求
 
 public:
-    TCPConnection(SubReactor*, std::function<void(Request)> request_callback);
+    TCPConnection(SubReactor*, std::function<void(ByteStream)> request_callback);
 
     void activate(Channel* channel, ConnectionToken token_);      // 激活函数，绑定channel，初始化状态等
     void deactivate();      //注销函数，注销channel
 
     Conn_state get_state() const { return state; }   // 返回当前状态
     ConnectionToken get_token() const { return token; }
-    
-    // process
-    void set_request_submit(std::function<void(Request)> _cb) { submit_request = std::move(_cb); }
 
     // send
     void to_send(const char* data, size_t len);

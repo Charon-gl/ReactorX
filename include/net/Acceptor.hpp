@@ -10,7 +10,7 @@
 #include "core/IO_Object.hpp"
 #include "utils/Err_Manager.hpp"
 
-#define MAX_LISTEN_NUM 1024
+#define INIT_LISTEN_NUM 1024
 
 
 class MainReactor;
@@ -19,18 +19,18 @@ class Acceptor : public IO_Object
 private:
     uint16_t port;
     sockaddr_in addr;
-
-    int init_listen_fd();
     
 public:
     explicit Acceptor(MainReactor* mainreactor);
+    
+    int init_listen_fd(uint16_t port_);
+    
+    void activate(Channel* channel);
+    void deactivate();
 
     void on_read() override;
     bool on_error(int err_no) override;
     void on_close(int err_no = 0) override;
-
-    std::unique_ptr<Channel> active(uint16_t port);      // 激活acceptor
-    void deactive();       // 重置acceptor
 
     Acceptor(Acceptor &&) = delete;
     Acceptor &operator=(Acceptor &&) = delete;

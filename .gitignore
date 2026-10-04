@@ -66,9 +66,17 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+benchmark/data/
 
 #logger
 Log/
 
-legacy/
-net_protocol/
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# others
+.codebuddy/
+.vscode/
+docs/
