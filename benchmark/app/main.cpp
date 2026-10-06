@@ -112,7 +112,7 @@ public:
     HttpResponse push_response(const HttpRequest& req)
     {
         HttpResponse resp{200};
-        resp.body = test_data::body_for(req.url);
+        resp.body = test_data::route(req.url);
         return resp;
     }
 
@@ -266,7 +266,7 @@ public:
     HttpResponse push_response(const HttpRequest& req)
     {
         HttpResponse resp{200};
-        resp.body = test_data::body_for(req.url);
+        resp.body = test_data::route(req.url);
         return resp;
     }
 
@@ -279,12 +279,12 @@ void tips()
                 << "arg0 is the execute_name of the process.\n"
                 << "arg1 is the port you would like to listen.\n"
                 << "arg2 is subreactor_num you need to create.\n"
-                << "arg3 is optional. It sets the mode of your application which is sync by default.\n"
-                << "'0': sync mode\n" 
-                << "'1': async mode\n"
-                << "arg4 is optional (async mode only). It sets the worker thread num of business pool.\n"
-                << "     default: std::thread::hardware_concurrency().\n"
-                << "other words: sync mode";
+                << "arg3 is optional:\n"
+                << "     omit    -> sync mode (business runs in subreactor thread).\n"
+                << "     provide -> async mode, the number = business worker thread num.\n"
+                << "examples:\n"
+                << "     ./Reactor 6666 8       # sync, 8 subreactors\n"
+                << "     ./Reactor 6666 8 4     # async, 8 subreactors + 4 workers\n";
         std::cout << std::endl;
 }
 
@@ -296,38 +296,25 @@ int main(int argc, char** argv)
         tips();
         exit(1);
     }
-    else if (argc > 5)
+    else if (argc > 4)
     {
-        std::cerr << "you should input less than 5 argc.\n";
+        std::cerr << "you should input at most 4 argc.\n";
         tips();
         exit(1);
     }
 
     if(argc == 3)
     {
+        // 同步模式：业务在 subreactor 线程内处理
         app_server_sync server(atoi(argv[1]), atoi(argv[2]));
         server.run();
     }
-    else if (argc >= 4)
+    else
     {
-        int m = atoi(argv[3]);
-        if (m == 1)
-        {
-            // 异步模式：业务线程池默认用满硬件并发数，可用 arg4 覆盖
-            int worker_num = std::thread::hardware_concurrency();
-            if (worker_num == 0)
-                worker_num = 1;
-            if (argc >= 5)
-                worker_num = atoi(argv[4]);
-
-            app_server_async server(atoi(argv[1]), atoi(argv[2]), worker_num);
-            server.run();
-        }
-        else
-        {
-            app_server_sync server(atoi(argv[1]), atoi(argv[2]));
-            server.run();
-        }
+        // 异步模式：arg3 = 业务 worker 线程数
+        int worker_num = atoi(argv[3]);
+        app_server_async server(atoi(argv[1]), atoi(argv[2]), worker_num);
+        server.run();
     }
 
     return 0;

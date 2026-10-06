@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <random>
+#include <chrono>
+#include <thread>
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 压测用固定大小响应体。
@@ -21,7 +23,7 @@
 //   }
 //
 // URL 与数据档位对应关系：
-//   /hello      -> 小数据  (12 B)
+//   /hello      -> 小数据  (11 B)  
 //   /data/1k    -> 1 KB
 //   /data/4k    -> 4 KB
 //   /data/8k    -> 8 KB
@@ -80,6 +82,54 @@ inline const std::string& body_for(const std::string& url)
     if (url == "/data/16k") return k16();
     if (url == "/data/64k") return k64();
     return small();
+}
+
+// ── CPU 密集负载：可调迭代次数（xorshift 混洗，volatile 防优化）────
+// 默认 300000 次 ≈ 1ms @3.8GHz，具体耗时需实测校准后调整默认值
+inline void compute_busy_work(int iterations)
+{
+    volatile uint64_t x = 0x9e3779b97f4a7c15ULL;
+    for (int i = 0; i < iterations; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+    }
+    (void)x;
+}
+
+// ── I/O 等待负载：sleep 指定毫秒 ─────────────────────────────────
+inline void delay_wait(int ms)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+// ── 简单 query 参数解析：从 url 取 ?key=<int>，缺省用 def ──────
+inline int query_int(const std::string& url, const std::string& key, int def)
+{
+    auto pos = url.find(key + "=");
+    if (pos == std::string::npos) return def;
+    pos += key.size() + 1;
+    int val = 0;
+    while (pos < url.size() && url[pos] >= '0' && url[pos] <= '9') {
+        val = val * 10 + (url[pos] - '0');
+        ++pos;
+    }
+    return val ? val : def;
+}
+
+// ── 业务路由：纯回包 / compute（CPU 密集）/ delay（I/O 等待）────
+// 用于模拟三类业务负载，证明框架不绑定业务、可替换协议/负载。
+inline const std::string& route(const std::string& url)
+{
+    if (url.rfind("/compute", 0) == 0) {
+        compute_busy_work(query_int(url, "n", 300000));
+        return small();
+    }
+    if (url.rfind("/delay", 0) == 0) {
+        delay_wait(query_int(url, "ms", 1));
+        return small();
+    }
+    return body_for(url);
 }
 
 } // namespace test_data

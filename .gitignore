@@ -67,6 +67,8 @@ vcpkg_installed/
 Testing/
 .cache/
 benchmark/data/
+benchmark/archive/
+benchmark/analysis/
 
 #logger
 Log/
