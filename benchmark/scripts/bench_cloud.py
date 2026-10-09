@@ -93,13 +93,15 @@ def detect_topology():
 
 core.OUTPUT_DIR = BENCHMARK_DIR / "data" / "cloud" / datetime.now().strftime("%Y%m%d_%H%M%S")
 
-# 云服务器（Xeon）每核 QPS 预估：11B ~2.2 万，大响应受内存带宽限制更低
+# 云服务器（8575C）每核 QPS 预估：第一次 baseline 实测扫到最高候选仍未到拐点，
+# 说明每核能力高于 8475B 经验值，上调以让候选覆盖真实拐点。
+#   11B 下界 >33000 → 估 36000；16KB >30000 → 估 33000；64KB >15000 → 估 17000
 core.LOADS = {
-    "11B":     ("/",          22000),
-    "16KB":    ("/data/16k",  20000),
-    "64KB":    ("/data/64k",  10000),
-    "compute": ("/compute?n=700000", 1000),   # 本机校准值，云上跑 calibrate.py 后更新
-    "delay":   ("/delay?ms=1",       1000),
+    "11B":     ("/",          36000),
+    "16KB":    ("/data/16k",  33000),
+    "64KB":    ("/data/64k",  17000),
+    "compute": ("/compute?n=520000", 1000),   # 云上 8575C 校准：520000 次 ≈ 1ms（实测 500000→958us, 800000→1524us）
+    "delay":   ("/delay?ms=1",       1000),   # 实测 1.07ms，准
 }
 
 # 场景：扩展性 sync-4/8/16/32 + async-16（同步 vs 异步对比）

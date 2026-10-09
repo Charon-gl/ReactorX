@@ -11,10 +11,11 @@ bench_max.py —— 极限（饱和）吞吐测试（独立脚本）
   - 负载：默认只测 echo 三档（11B/16KB/64KB），与基准 baseline 一一对应、可对比；
     不测 compute/delay（打满意义不大，省时间）
 
-本机与云上通用：import bench_cloud 自动探测各自 NUMA 拓扑。
+本机/云上切换：默认本机（sync-1/4/async-4），加 --cloud 用云上（sync-4/8/16/32/async-16）。
 
 用法：
-    sudo python3 bench_max.py                     # 全部场景 × echo 三负载
+    sudo python3 bench_max.py                     # 本机全部场景 × echo 三负载
+    sudo python3 bench_max.py --cloud             # 云上全部场景 × echo 三负载
     sudo python3 bench_max.py --scene sync-4      # 只测某场景
     sudo python3 bench_max.py --load 11B,64KB     # 指定负载（进一步省时间）
     sudo python3 bench_max.py --repeat 3          # 每点重复次数（取中位数）
@@ -32,14 +33,22 @@ import argparse
 import csv
 import subprocess
 import atexit
+import importlib
 from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bench_cloud as cloud
 
-core = cloud.core
-BENCHMARK_DIR = cloud.BENCHMARK_DIR
+# 根据 --cloud 预判用本机还是云上配置（import 必须在 argparse 前决定用哪套场景/核分配）：
+#   - 本机（默认）：bench_local 的场景（sync-1/4/async-4）+ P/E 核硬编码
+#   - 云上（--cloud）：bench_cloud 的场景（sync-4/8/16/32/async-16）+ NUMA 自动探测
+if "--cloud" in sys.argv:
+    cloud = importlib.import_module("bench_cloud")
+    core = cloud.core
+    BENCHMARK_DIR = cloud.BENCHMARK_DIR
+else:
+    core = importlib.import_module("bench_local")
+    BENCHMARK_DIR = core.BENCHMARK_DIR
 
 MAX_RATE = 10_000_000   # 极大 -R（wrk2 必填 -R），让服务器尽力打，实际 QPS 收敛到极限
 
@@ -142,6 +151,7 @@ def main():
     parser.add_argument("--scene", type=str, default=None, help="只测某场景（默认全部）")
     parser.add_argument("--load", type=str, default="11B,16KB,64KB", help="逗号分隔的负载名")
     parser.add_argument("--repeat", type=int, default=core.REPEAT)
+    parser.add_argument("--cloud", action="store_true", help="用云上配置（场景 sync-4/8/16/32/async-16 + NUMA 探测）")
     args = parser.parse_args()
 
     core.REPEAT = args.repeat

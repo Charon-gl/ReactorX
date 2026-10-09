@@ -79,7 +79,7 @@ public:
     void unregister_channel(int fd);
 
 protected:
-    counter reactor_counter;        // 该计数器用于reactor编号，因此只增不减
+    counter reactor_counter;        // 维护所管理对象的标识号，只增不减
     void io_event(int fd, uint32_t events) override;
     
 private:

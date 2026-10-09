@@ -139,12 +139,20 @@ def alloc_cores(sub, worker):
 
 # ── FD 上限 ────────────────────────────────────────────────────────
 def raise_nofile():
+    """把 FD 上限拉到尽量高：root 下直接设 100 万（soft+hard 都提），
+    非 root 降级到 hard 上限（至少 soft=hard）。峰值并发 50000 连接才稳。"""
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-        return soft, hard
+        target = max(hard, 1_000_000)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, target))
+        return soft, target
     except Exception:
-        return None, None
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            return soft, hard
+        except Exception:
+            return None, None
 
 
 def server_preexec():
