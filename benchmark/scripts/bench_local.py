@@ -528,9 +528,18 @@ def run_conn_scan(name, load_name, rate, conns, dur):
 
 # ── 火焰图采集（基准测试后单独采，全景瓶颈刻画）──────────────────
 def find_flamegraph_tools():
-    """查找 FlameGraph 工具（stackcollapse-perf.pl / flamegraph.pl），找不到返回 (None, None)"""
-    for base in (Path("/opt/FlameGraph"), Path.home() / "FlameGraph",
-                 Path("/usr/local/FlameGraph")):
+    """查找 FlameGraph 工具（stackcollapse-perf.pl / flamegraph.pl），找不到返回 (None, None)。
+    兼容 sudo 运行：sudo 下 Path.home() 是 /root，需额外查真实用户（SUDO_USER）的 HOME。"""
+    bases = [Path("/opt/FlameGraph"), Path("/usr/local/FlameGraph"),
+             Path.home() / "FlameGraph"]
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            import pwd
+            bases.append(Path(pwd.getpwnam(sudo_user).pw_dir) / "FlameGraph")
+        except (ImportError, KeyError):
+            pass
+    for base in bases:
         stack, flame = base / "stackcollapse-perf.pl", base / "flamegraph.pl"
         if stack.exists() and flame.exists():
             return stack, flame

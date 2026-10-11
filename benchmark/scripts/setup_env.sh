@@ -59,6 +59,7 @@ case "${OS}" in
             python3 python3-pip \
             linux-tools-common linux-tools-generic \
             iptables iproute2 \
+            wget curl \
             htop
         ;;
     centos|rhel|rocky|almalinux|fedora)
@@ -131,21 +132,44 @@ else
 fi
 
 # ── 6. FlameGraph 工具（火焰图 SVG 生成）────────────────────────────
-# find_flamegraph_tools() 会查找 /opt/FlameGraph、~/FlameGraph、/usr/local/FlameGraph。
-# 优先用本地打包的 FlameGraph（github 国内可能不可达），否则 git clone。
+# 火焰图只需两个 perl 脚本：stackcollapse-perf.pl + flamegraph.pl。
+# 优先本地已打包，否则自动下载（国内走 ghproxy 加速，避免 github 直连失败）。
 info "安装 FlameGraph 工具（火焰图 SVG 生成）..."
-if [ -d /opt/FlameGraph ] && [ -f /opt/FlameGraph/flamegraph.pl ]; then
-    ok "FlameGraph 已存在: /opt/FlameGraph"
-elif [ -d "${HOME}/FlameGraph" ] && [ -f "${HOME}/FlameGraph/flamegraph.pl" ]; then
-    ok "FlameGraph 已存在: ${HOME}/FlameGraph"
-elif [ -f "${SCRIPT_DIR}/FlameGraph/flamegraph.pl" ]; then
-    cp -r "${SCRIPT_DIR}/FlameGraph" /opt/FlameGraph
-    ok "FlameGraph 已从脚本目录复制到 /opt/FlameGraph"
-elif git clone https://github.com/brendangregg/FlameGraph.git /opt/FlameGraph 2>/dev/null; then
-    ok "FlameGraph 已 git clone 到 /opt/FlameGraph"
-else
-    warn "FlameGraph 下载失败（github 不可达）。请本机 git clone FlameGraph，打包到 benchmark/scripts/FlameGraph/ 后重跑本脚本"
-fi
+FG_DIR="/opt/FlameGraph"
+install_flamegraph() {
+    # 已装好
+    if [ -f "$FG_DIR/flamegraph.pl" ]; then
+        ok "FlameGraph 已存在: $FG_DIR"; return 0
+    fi
+
+    # 1) 本地已打包：scripts/FlameGraph 或 ~/FlameGraph
+    if [ -f "${SCRIPT_DIR}/FlameGraph/flamegraph.pl" ]; then
+        cp -r "${SCRIPT_DIR}/FlameGraph" "$FG_DIR" && { ok "从脚本目录复制: $FG_DIR"; return 0; }
+    fi
+    if [ -f "${HOME}/FlameGraph/flamegraph.pl" ]; then
+        mkdir -p "$FG_DIR"
+        cp -f "${HOME}/FlameGraph/stackcollapse-perf.pl" "${HOME}/FlameGraph/flamegraph.pl" "$FG_DIR/" 2>/dev/null \
+            && { ok "从 HOME 复制: $FG_DIR"; return 0; }
+    fi
+
+    # 2) 自动下载：github raw + 国内加速代理依次尝试（单个脚本，无需 git clone）
+    mkdir -p "$FG_DIR"
+    local RAW="https://raw.githubusercontent.com/brendangregg/FlameGraph/master"
+    local base
+    for base in "https://ghproxy.net/$RAW" "https://mirror.ghproxy.com/$RAW" "$RAW"; do
+        if wget -q --timeout=12 -O "$FG_DIR/stackcollapse-perf.pl" "$base/stackcollapse-perf.pl" 2>/dev/null \
+           && wget -q --timeout=12 -O "$FG_DIR/flamegraph.pl" "$base/flamegraph.pl" 2>/dev/null \
+           && [ -s "$FG_DIR/flamegraph.pl" ]; then
+            chmod +x "$FG_DIR/stackcollapse-perf.pl" "$FG_DIR/flamegraph.pl"
+            ok "FlameGraph 自动下载完成: $FG_DIR（源: $base）"
+            return 0
+        fi
+    done
+
+    warn "FlameGraph 自动下载失败（网络受限）；火焰图将只保留 .script，需手动生成 SVG"
+    return 1
+}
+install_flamegraph
 
 # ── 7. 版本检查 ──────────────────────────────────────────────────────
 echo ""
