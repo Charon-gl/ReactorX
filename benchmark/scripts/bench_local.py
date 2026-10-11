@@ -362,7 +362,7 @@ def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, es
     阈值自适应于实际负载的健康延迟，不硬编码任何消息大小的绝对延迟。"""
     url = f"http://{HOST}:{port}{url_path}"
     est = max(1000, sub * est_per_core)
-    probes = [int(est * f) for f in (0.6, 1.0, 1.4)]
+    probes = [int(est * f) for f in (0.6, 1.0, 1.6)]
     log(f"  [{name}] {url_path} 预估 {est}，探测点: {probes}")
 
     def overloaded(rate):
