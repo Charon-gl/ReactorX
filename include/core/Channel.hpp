@@ -1,9 +1,8 @@
 #pragma once
 
-#include <iostream>
 #include <functional>
 #include <atomic>
-#include <stdint.h>
+#include <sys/types.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -11,12 +10,7 @@
 #include <sys/epoll.h>
 #include <memory>
 
-enum class event_state
-{
-    DOING,
-    DONE,
-    WRONG
-};
+
 class Channel
 {
 private:
@@ -38,7 +32,7 @@ public:
     void clear_events();
     
     int get_fd() const;
-    u_int32_t get_events() const;
+    uint32_t get_events() const;
     
     void activate(int fd, uint32_t events_);
         

@@ -1,5 +1,6 @@
 #pragma once
-#include <iostream>
+
+#include <thread>
 #include <functional>
 #include <atomic>
 #include "utils/counter.hpp"

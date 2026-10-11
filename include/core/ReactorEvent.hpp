@@ -1,6 +1,5 @@
 #pragma once
 
-#include <iostream>
 #include <thread>
 #include <variant>
 #include <type_traits>

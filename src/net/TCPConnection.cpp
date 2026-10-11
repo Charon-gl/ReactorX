@@ -84,7 +84,7 @@ void TCPConnection::on_read()
     swap(data, recv_buf);
     
     request_count.inc();        // 请求数量+1
-    submit_request(ByteStream{token, std::move(data)});
+    submit_request(ByteStream{token, std::move(data)});     // 提交字节流
     return;
 }
 
@@ -128,7 +128,7 @@ bool TCPConnection::on_error(int err_no)
     case Err_Rank::RETRY:
         return false;
     default:
-        on_close(err_no);
+        on_close(err_no);       // 连接已经出问题了，没必要再继续维持，直接关闭
         break;
     }
     return true;
@@ -136,7 +136,7 @@ bool TCPConnection::on_error(int err_no)
 
 void TCPConnection::on_close(int err_no)
 {
-    if (close_event_sent)
+    if (close_event_sent)   // 为true说明已经被关闭了，当前连接不会再重复关闭
         return;
 
     close_event_sent = true;

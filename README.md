@@ -1,172 +1,267 @@
-# Reactor-HTTP-Server  
-这是一个基于C++从零构建的单Reactor模式HTTP服务器，支持GET请求和静态资源，具有单线程和线程池版本，并通过高并发压力测试  
------------------------------   
-## 核心特性  
-- **事件驱动架构**:基于epoll的单Reactor模型，支持边沿触发(ET)和非阻塞I/O  
-- **HTTP/1.0支持**:手动实现HTTP解析器，支持GET请求，返回200/404状态码  
-- **多线程演进**:提供单线程和线程池两个版本，将I/O与计算分离，充分利用多核CPU  
-- **模块化错误处理**:全局错误管理模块，实现唯一的关闭连接路径，妥善处理大部分TCP异常  
-- **高性能**:单线程版本QPS超15k，多线程版本可稳定处理数千并发连接，支持wrk压力测试  
-- **健壮的内存管理**:利用 *shared_ptr/weak_ptr* 解决多线程下对象生命周期问题  
-- **日志系统**:支持文件输出的轻量级日志，可分别记录连接、系统的错误信息
+# ReactorX
 
-## 架构设计  
-### 单线程Reactor(main)    
-```mermaid  
-graph TD
-    Client[HTTP Client] -->|TCP 连接| Acceptor
-    
-    subgraph MainThread [单线程 Reactor]
-        EventLoop[EventLoop<br/>epoll_wait]
-        Acceptor[Acceptor<br/>监听 socket]
-        Channel[Channel<br/>fd + 事件回调]
-        TCPConn[TCPConnection<br/>recv_buf / send_buf]
-        HTTPParser[HTTP_Analysis<br/>解析请求 / 生成响应]
-    end
+> 基于 epoll 的主从 Reactor TCP 网络框架  
+> 主要负责两件事：**管理连接**，**传递字节流**
 
-    Acceptor -->|accept 新连接| TCPConn
-    TCPConn -->|创建| Channel
-    Channel -->|注册 EPOLLIN| EventLoop
-    
-    EventLoop -->|触发读事件| TCPConn
-    TCPConn -->|recv 数据| HTTPParser
-    HTTPParser -->|解析请求| StaticFile[静态文件系统]
-    StaticFile -->|文件内容| HTTPParser
-    HTTPParser -->|生成响应| TCPConn
-    TCPConn -->|send 响应| Client
-    
-    EventLoop -->|关闭连接或错误| TCPConn  
+`C++20` · `Linux` · `epoll`
+
+---
+
+## 它是什么
+
+ReactorX 是一块网络底板。
+
+它建立连接、维护连接、关闭连接；它收字节、发字节、缓存字节。除此之外什么都不管——不解析协议，不关心业务，不知道你发的是 HTTP 还是 protobuf。
+
+这是刻意的克制。因为它不解析协议，所以能承载任何协议；因为它不碰业务，所以能接入任何执行模型。HTTP 框架、RPC 框架、游戏网关、自定义二进制服务，都可以直接架在它上面，而它不需要为其中任何一个改动一行。
+
+它不是 Web 框架，也不是 RPC 框架。它是这些框架下面那一层。
+
+
+## 设计取舍
+
+一个通用框架的价值，藏在它**选择不做什么**里。
+
+**不负责协议解析。** 粘包、半包、协议升级，全交给业务层。这是灵活性必须付的代价——一旦框架替你拆包，它就只能服务一种协议。
+
+**不限定执行模型。** 回调怎么跑，由业务决定。可以让它直接在 SubReactor 线程里执行，享受零跨线程开销；也可以投到独立线程池，让 reactor 永不被业务阻塞。同步还是异步，是业务的选择，不是框架的规定。
+
+**不允许连接共享。** 一条连接建立后，终身绑定到一个 SubReactor。这是全框架最硬的约束，也是收益最大的一个——它让连接的所有读写事件天然串行，不需要锁，也避免了缓存行在两个核之间反复弹跳。
+
+**不暴露裸指针。** 连接的生命周期由框架托管，异步回调下不会出现悬垂引用。业务拿到的永远是一个可安全使用的句柄。
+
+
+## 核心机制
+
+### accept 与读写分离
+
+MainReactor 的 Acceptor 负责 `accept`。拿到新连接，轮询分发给某个 SubReactor，立刻返回，不再关心这条连接的任何后续。
+
+SubReactor 处理已经绑定的连接。一条连接在建立那一刻被固定到某个 SubReactor，之后它的所有读、写、错误事件，永远只在那一个线程里被处理。
+
+结果是：**连接级串行，无需加锁。**
+
+### 同步零开销，异步不阻塞
+
+框架不规定回调在哪里执行，使用者可以自由选择执行模型，主要分为以下两类：
+
+- **同步**——回调直接在 SubReactor 线程内运行。没有跨线程投递，没有队列，没有唤醒。适合轻处理，比如回一个心跳响应。
+- **异步**——回调把任务投到 worker 线程池或协程，SubReactor 立刻返回继续处理 IO。适合重逻辑，比如查库、调下游。
+
+### 分发器
+
+业务不直接碰 reactor，也不直接碰连接对象。所有交互经过 `Dispatcher`：
+
+- **上行**：`publish_stream` 把字节流交给业务；
+- **下行**：`submit_operation` 把业务的发送、关闭指令投回对应的 SubReactor。
+
+这个机制保证了一件事：**业务永远不会在错误的线程里操作连接。** 所有跨线程投递由框架编排。
+
+
+## 架构与模型
+
+### 主要架构
+
+```mermaid
+flowchart TD
+    TCP连接["TCP连接"]
+    MainReactor["MainReactor"]
+    SubReactor0["SubReactor 0"]
+    SubReactor1["SubReactor 1"]
+    SubReactorN["SubReactor N"]
+    Dispatcher["Dispatcher"]
+    业务层["业务层"]
+
+    TCP连接 --> MainReactor
+    MainReactor --> SubReactor0
+    MainReactor --> SubReactor1
+    MainReactor --> SubReactorN
+    SubReactor0 <--> Dispatcher
+    SubReactor1 <--> Dispatcher
+    SubReactorN <--> Dispatcher
+    Dispatcher <--> 业务层
 ```
 
-### 线程池Reactor(feature/threads)  
-```mermaid  
-graph TD
-    Client[HTTP Client] -->|TCP 连接| Acceptor
-    
-    subgraph MainThread [主线程 - 仅 I/O 事件]
-        EventLoop[EventLoop<br/>epoll_wait]
-        Acceptor[Acceptor]
-        TCPConn[TCPConnection]
-    end
-    
-    subgraph ThreadPool [线程池]
-        Worker1[Worker 1]
-        Worker2[Worker 2]
-        WorkerN[Worker N]
-        TaskQueue[任务队列<br/>std::queue + mutex]
-    end
-    
-    subgraph Business [业务处理]
-        HTTPParser[HTTP_Analysis<br/>解析 & 文件读取]
-    end
-    
-    Acceptor -->|accept| TCPConn
-    TCPConn -->|创建 Channel| EventLoop
-    EventLoop -->|读事件| TCPConn
-    TCPConn -->|读取原始数据| TaskQueue
-    TaskQueue -->|分配任务| Worker1
-    TaskQueue -->|分配任务| Worker2
-    Worker1 --> HTTPParser
-    HTTPParser -->|生成响应| TCPConn
-    TCPConn -->|eventfd 通知主线程| EventLoop
-    EventLoop -->|注册 EPOLLOUT| TCPConn
-    TCPConn -->|send 响应| Client  
+`accept` 和 `读写` 是两条独立路径。MainReactor 只负责连接的诞生，SubReactor 只负责连接的存活，Dispatcher 在 SubReactor 与 业务 之间，是上下行的唯一通道。
+
+### 线程模型
+
+- **1 个 MainReactor 线程**：负责 accept。所有新连接都在这一个线程里诞生，然后被派发出去。
+- **N 个 SubReactor 线程**：每条连接终身绑定其中一个。该连接的读写事件、错误处理，全部在这个线程内串行完成。
+- **M 个 worker 线程**：仅异步模式下存在。业务回调不阻塞 SubReactor，而是投递到由使用者自定义实现的 worker 池执行。
+
+MainReactor 和 SubReactor 的数量在启动时确定，运行期不变。
+
+### 组件关系
+
+**Reactor 体系**
+
+```mermaid
+flowchart TD
+    EventLoop["EventLoop"]
+    ReactorBase["ReactorBase"]
+    MainReactor["MainReactor"]
+    SubReactor["SubReactor"]
+    Acceptor0["Acceptor 0"]
+    Acceptor1["Acceptor 1"]
+    AcceptorN["Acceptor N"]
+    TCPConnection0["TCPConnection 0"]
+    TCPConnection1["TCPConnection 1"]
+    TCPConnectionN["TCPConnection N"]
+
+    EventLoop --> ReactorBase
+    ReactorBase --> MainReactor
+    ReactorBase --> SubReactor
+    MainReactor -.-> Acceptor0
+    MainReactor -.-> Acceptor1
+    MainReactor -.-> AcceptorN
+    SubReactor -.-> TCPConnection0
+    SubReactor -.-> TCPConnection1
+    SubReactor -.-> TCPConnectionN
 ```
 
-## 性能测试  
+EventLoop → ReactorBase → MainReactor / SubReactor 为继承链；MainReactor 管理一个（也可扩展成多个） Acceptor，SubReactor 管理多个 TCPConnection。
 
-使用**wrk**在本地回环进行压力测试(测试文件: *hello.txt*，约 50 字节):
 
-|         版本         | 并发数 |  QPS  | 平均延迟 |
-| :------------------: | :----: | :---: | :------: |
-| 单线程(accept优化后) |   50   | 22415 |  2.05ms  |
-| 单线程(accept优化后) |  100   | 21055 |  4.34ms  |
-| 单线程(accept优化后) | 12500  | 18487 |  208ms   |
-|        线程池        |  100   | 3394  | 15.78ms  |
-|        线程池        |  1000  | 2705  |  187ms   |
+**IO 体系**
 
-> 详细数据及交互式图表请查看 [完整压测报告](https://Charon-gl.github.io/Reactor-HTTP-Server/wrk_data/test_data.html)。
+```mermaid
+flowchart TD
+    IO_Object["IO_Object"]
+    Acceptor["Acceptor"]
+    TCPConnection["TCPConnection"]
 
-## 目录结构  
+    IO_Object --> Acceptor
+    IO_Object --> TCPConnection
+```
+
+Acceptor 和 TCPConnection 都继承自 IO_Object。
+
+
+### 一条连接的完整流程
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant 客户端
+    participant MainReactor
+    participant SubReactor
+    participant TCPConnection
+    participant Dispatcher
+    participant 业务
+
+    客户端->>MainReactor: TCP 连接建立
+    MainReactor->>SubReactor: accept 后轮询派发
+    Note over MainReactor,SubReactor: 连接终身绑定，之后所有事件都在该 SubReactor 线程处理
+
+    客户端->>SubReactor: 发送数据
+    SubReactor->>TCPConnection: 读事件 on_read()
+    TCPConnection->>Dispatcher: publish_stream（数据上行）
+    Dispatcher->>业务: 业务回调
+
+    业务->>Dispatcher: submit_operation（操作下行）
+    Dispatcher->>SubReactor: 投递操作
+    SubReactor->>TCPConnection: 发送操作
+    TCPConnection->>客户端: 发送响应
+```
+
+---
+
+## 快速开始
+
+### 环境要求
+
+- Linux（内核支持 epoll）
+- C++20 编译器：g++ 11+ 或 clang 14+
+- CMake 3.15+
+
+### 极简示例
+
+以下是一个同步模式的示例。
+
+无论你实现的是什么业务，只需要绑定 Dispatcher 的两个回调即可：
+
+```cpp
+#include "ReactorX.hpp"
+#include <iostream>
+#include <cstdlib>
+
+int main(int argc, char* argv[])
+{
+    uint16_t port = argc > 1 ? std::atoi(argv[1]) : 6666;  // 监听端口
+    int sub_num   = argc > 2 ? std::atoi(argv[2]) : 4;     // SubReactor 数量
+
+    Dispatcher dispatcher;
+
+    // 绑定业务回调：收到一段字节流（ByteStream）后处理，并回传响应
+    dispatcher.set_business_callback([&dispatcher](ByteStream stream) {
+        std::cout << stream.data << '\n';   // stream.data：收到的字节
+
+        // 把数据投回框架发送
+        dispatcher.submit_operation(Operation{Send_Operation{stream.token, stream.data}});    // stream.token：连接唯一标识，dispatcher通过该数据结构把Operation投递回对应的SubReactor；
+    });
+
+    // 绑定关闭回调：连接关闭时触发
+    dispatcher.set_close_callback([](ConnectionToken token) {
+        std::cout << "连接关闭  reactor=" << token.reactor_id
+                  << " slot=" << token.slot << '\n';
+    });
+
+    /*
+    dispatcher.init_mode(mode::async);      // dispatcher默认您的业务与SubReactor是同一线程的，如果业务是异步的，则需要主动调用该函数指定为异步模式
+    */
+
+    // 创建 MainReactor，监听 port，启动 sub_num 个 SubReactor
+    MainReactor reactor(port, sub_num, dispatcher);
+
+    // 启动MainReactor的eventloop
+    reactor.run();
+    return 0;
+}
+```
+
+### 编译静态库
+
+```bash
+cmake -S . -B build
+cmake --build build -j$(nproc)
+# 产物：build/libReactorX.a
+```
+
+### 编译链接
+
+```bash
+g++ -std=c++20 main.cpp -I<path/to/include> build/libReactorX.a -pthread -o server
+./server 6666 4
+```
+
+> **使用前请知悉**：ReactorX 不做协议解析。粘包、半包、协议边界的处理，需要业务层自行完成。这不是缺陷，是通用框架换取灵活性的必然代价。
+
+---
+
+## 目录结构
+
 ```text
-Reactor_Server/  
-|  
-|——build/  
-|  
-|——include/  
-|  |—— Acceptor.hpp  
-|  |—— Channel.hpp  
-|  |—— Err_Manager.hpp  
-|  |—— err_to_string.hpp  
-|  |—— EventLoop.hpp  
-|  |—— HTTP_Analysis.hpp  
-|  |—— Logger.hpp  
-|  |—— Server.hpp  
-|  |—— TCPConnection.hpp  
-|  |—— ThreadPool.hpp       #features/threads only  
-|  
-|——Log/  
-|  
-|——src/  
-|  |—— main.cpp  
-|  |—— Acceptor.cpp  
-|  |—— Channel.cpp  
-|  |—— Err_Manager.cpp  
-|  |—— err_to_string.cpp  
-|  |—— EventLoop.cpp  
-|  |—— HTTP_Analysis.cpp  
-|  |—— Logger.cpp  
-|  |—— Server.cpp  
-|  |—— TCPConnection.cpp  
-|  |—— ThreadPool.cpp       #features/threads only  
-|  
-|——CMakeLists.txt
-```  
-
-## 快速开始  
-### 环境要求  
-  - Linux (支持epoll)  
-  - C++17 编译器(g++ 7+ 或 clang 5+)  
-  - CMake 3.10+  
-### 编译与运行  
-```bash  
-#克隆仓库
-git clone https://github.com/Charon-gl/Reactor-HTTP-Server.git
-cd Reactor-HTTP-Server
-
-#tips:默认监听0.0.0.0:6666(可进入src/main.cpp修改监听端口)，请根据实际静态资源目录修改src/HTTP_Analysis.cpp63行的URL路径：
-#auto URL = "资源路径" + ...
-
-#单线程版本(main分支)
-git checkout main
-mkdir build && cd build
-cmake ../ && make
-./Server
-
-#线程池版本(feature/threads分支)
-git checkout feature/threads
-mkdir build && cd build
-cmake ../ && make
-./Server
+ReactorX/
+├── include/            # 框架头文件（core / net / reactor / utils）
+├── src/                # 框架实现（与 include 对应）
+├── README.md
+└── CMakeLists.txt
 ```
 
-## 技术难点与解决方案  
-### 1. 架构设计与分工  
-  从简单的echo服务器迭代到单Reactor模型，经历了多次重构。主要挑战在于明确各模块的职责： *EventLoop* 负责事件循环与分发, *Acceptor* 管理监听socket, *Channel* 作为事件载体, *TCPConnection* 管理单个连接。  
-  通过回调链 *EventLoop* -> *Channel* -> *TCPConnection* -> *Server* 实现解耦，避免了循环引用和职责混乱。  
-### 2. 错误处理与关闭机制  
-  - **问题**:错误来源多样(epoll错误、系统调用返回-1)，且不同模块需要不同的处理策略。  
-  - **方案**:设计 *Err_Manager* 类，仅根据 *errno* 返回操作等级 *IGNORE/RETRY/CLOSE_FD/CLOSE_ALL* ，具体操作由调用者执行。epoll错误事件则在 *Channel::handle_event()* 中直接处理。  
-  - **优化**:为避免 *errno* 在后续多线程场景被覆盖，每个连接新增了成员 *_errno*保存当前的 *errno* 。 
-### 3. 多线程下的对象生命周期管理  
-  - **问题**:主线程执行发送任务时可能连接已被提前释放，回调可能会访问空指针。  
-  - **方案**： *TCPConnection* 继承 *enable_shared_from_this* ，工作线程通过 *weak_ptr* 访问，尝试升级为 *shared_ptr* 成功再执行任务。主线程同理。主要就是在工作线程或者主线程执行任务过程中保证连接的存活。  
-### 4. 性能优化  
-  - **问题**:压力测试第二轮QPS几乎为0，原因是只处理了一个 *accept* 导致已完成连接队列堆积。  
-  - **修复**: Acceptor 的fd读事件中循环调用 *accept* 直到 *EAGAIN* ，一次处理所有就绪连接，经过检测QPS提升约70%。  
-  - **工具**:使用 *strace* 跟踪系统调用，定位到 *send* 未执行的原因是条件分支写错。
+### 分层
 
-## 未来计划  
-1. 支持HTTP/1.1 长连接 + 超时处理  
-2. 实现主从Reactor模型
-3. 进一步性能优化
+| 层 | 目录 | 组件 |
+|---|---|---|
+| 核心 | `include/core/` | `EventLoop` `Channel` `ReactorBase` `ReactorEvent` `IO_Object` |
+| 网络 | `include/net/` | `Acceptor` `TCPConnection` `Dispatcher` `ConnectionToken` |
+| Reactor | `include/reactor/` | `MainReactor` `SubReactor` |
+| 工具 | `include/utils/` | `counter` `Err_Manager` |
+
+---
+
+## 性能
+
+完整测试方案见 [`benchmark/docs/test_plan.md`](benchmark/docs/test_plan.md)。
+
+> 数据与分析整理中。

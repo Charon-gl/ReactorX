@@ -17,7 +17,7 @@ void ReactorBase::unregister_channel(int fd)
     }
 }
 
-void ReactorBase::core_error(int err_no)
+void ReactorBase::core_error(int err_no)        // 从EventLoop传来的错误
 {
     auto err_rank = Err_Manager::err_judge(err_no);
     if (err_rank == Err_Rank::CLOSE_CONNECTION || err_rank == Err_Rank::FATAL)

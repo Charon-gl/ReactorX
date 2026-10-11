@@ -1,6 +1,5 @@
 #pragma once
 
-#include <iostream>
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>

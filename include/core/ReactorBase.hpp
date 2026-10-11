@@ -1,6 +1,5 @@
 #pragma once
 
-#include <iostream>
 #include <memory>
 #include <unordered_map>
 #include <variant>
@@ -39,8 +38,8 @@ public:
 
     
     Channel* try_get_channel(int fd)
-    {// fd直接作为key，若找不到则创建一个channel
-        uint32_t events = EPOLLET | EPOLLIN | EPOLLRDHUP;
+    {// fd直接作为key
+        uint32_t events = EPOLLET | EPOLLIN | EPOLLRDHUP;       // 理论上要先绑定事件回调函数才能打开读监听，但是在同一线程内所以没有这个时间差的问题
         
         auto it = channels.find(fd);
         if(it != channels.end())
@@ -54,6 +53,7 @@ public:
             return it->second.get();
         }
         
+        // 没有就新建一个Channel
         auto channel = std::make_unique<Channel>();
         channel->set_update_events([this](Channel* channel) { 
             int fd = channel->get_fd();

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <iostream>
 #include <memory>
 #include <string>
 #include <errno.h>
@@ -38,8 +37,7 @@ private:
     size_t send_begin_pos;      // 尚未发送的数据起始位置
     Conn_state state;
     counter request_count;       // 记录提交的请求数
-    bool close_event_sent;
-
+    bool close_event_sent;       // 连接关闭保护位，确保一个连接只被关闭一次
 
     bool transition(Conn_state new_state);      //状态转换函数
 
