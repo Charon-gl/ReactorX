@@ -357,7 +357,7 @@ def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, es
     避免拐点落在过载区，让正式测的 P99 落在毫秒级「可用吞吐」区间。"""
     url = f"http://{HOST}:{port}{url_path}"
     est = max(1000, sub * est_per_core)
-    candidates = sorted({int(est * f) for f in (0.5, 0.75, 1.0, 1.25, 1.5)})
+    candidates = sorted({int(est * f) for f in (0.2, 0.4, 0.6, 0.8, 1.0, 1.25)})
     log(f"  [{name}] {url_path} 预估 {est}，-R 候选: {candidates}")
 
     prev_ok = candidates[0]
