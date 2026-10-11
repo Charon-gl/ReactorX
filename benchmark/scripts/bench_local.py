@@ -356,13 +356,14 @@ def run_wrk(url, c, lua_path, wrk_cores, dur, server_pid, rate, perf_events=None
 
 
 # ── 峰值扫描（3 探测点定位 + 二分收敛，找 P99 突变拐点）────────────
-def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, est_per_core):
-    """拐点检测：以历史数据预估的 est 为中心，取 3 个探测点（0.6/1.0/1.4×est），
+def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, est_per_core, worker=None):
+    """拐点检测：以历史数据预估的 est 为中心，取 3 个探测点（0.6/1.0/2.0×est），
     找到 P99 超过「基线×KNEE_RATIO」的过载档后，在健康档与过载档之间二分收敛到精确上界。
-    阈值自适应于实际负载的健康延迟，不硬编码任何消息大小的绝对延迟。"""
+    阈值自适应于实际负载的健康延迟，不硬编码任何消息大小的绝对延迟。
+    异步场景业务在 worker 线程跑，用 worker 数估 est（同步场景用 sub）。"""
     url = f"http://{HOST}:{port}{url_path}"
-    est = max(1000, sub * est_per_core)
-    probes = [int(est * f) for f in (0.6, 1.0, 1.6)]
+    est = max(1000, (worker or sub) * est_per_core)
+    probes = [int(est * f) for f in (0.6, 1.0, 2.0)]
     log(f"  [{name}] {url_path} 预估 {est}，探测点: {probes}")
 
     def overloaded(rate):
@@ -425,7 +426,7 @@ def run_scenario(name, load_names, modes, plan=None):
         # 每个负载：先扫 keepalive 拐点，再对每个连接模式用同拐点测（对比公平）
         for lname in load_names:
             url_path, est_per_core = LOADS[lname]
-            knee = scan_knee(name, sub, port, server_cores, wrk_cores, srv.pid, url_path, est_per_core)
+            knee = scan_knee(name, sub, port, server_cores, wrk_cores, srv.pid, url_path, est_per_core, worker)
             url = f"http://{HOST}:{port}{url_path}"
             for mode in modes:
                 lua = make_lua(mode, url_path)
@@ -596,7 +597,7 @@ def collect_flamegraph(name="sync-4", mode="keepalive", path="/data/64k"):
             if u == path:
                 est_per_core = e
                 break
-        peak = scan_knee(name, sub, port, server_cores, wrk_cores, srv.pid, path, est_per_core)
+        peak = scan_knee(name, sub, port, server_cores, wrk_cores, srv.pid, path, est_per_core, worker)
 
         # perf record 并行采样
         perf_data = OUTPUT_DIR / f"flame_{name}_{mode}.data"
