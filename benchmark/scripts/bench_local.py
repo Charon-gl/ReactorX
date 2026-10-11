@@ -63,11 +63,12 @@ SCENARIOS = [
 # ── 负载（业务类型）：name -> (url, 每核 QPS 预估) ─────────────────
 # echo=纯回包；compute=CPU 密集（默认 ~1ms/请求）；delay=I/O 等待（默认 1ms/请求）
 # est_per_core 按本机历史拐点校准（014131 拐点 11B=220k / 16KB=140k / 64KB=60k，除以 5 核），
-# 让历史拐点落在候选中间（1.0×est 附近），上界比历史拐点高约 30% 留余量。
+# 让历史拐点落在候选中间（1.0×est 附近），上界留约 40% 余量。
+# 64KB 的 2ms 历史拐点（60k）偏低（自适应阈值下真实拐点更高），改按极限吞吐 ~134k 估算。
 LOADS = {
     "11B":     ("/",          57000),
     "16KB":    ("/data/16k",  36000),
-    "64KB":    ("/data/64k",  16000),
+    "64KB":    ("/data/64k",  24000),
     "compute": ("/compute?n=700000", 1000),   # 本机 P 核校准：700000 次 ≈ 1ms
     "delay":   ("/delay?ms=1",       1000),   # sleep 1ms（实测 ~1.2ms，含调度开销）
 }
@@ -94,7 +95,7 @@ WRK_THREADS    = 0            # 0 表示自动 = wrk 核数
 DURATION       = 30           # 拐点处正式测试时长（秒）
 REPEAT         = 3            # 拐点处重复次数，取中位数（平滑偶发噪声）
 SCAN_DUR       = 15           # 峰值扫描每档时长（秒），15s 让尾延迟 P99 更稳
-KNEE_RATIO     = 5            # 拐点突变倍数：P99 涨到健康基线的 5 倍即视为过载（相对突变，自适应任何负载）
+KNEE_RATIO     = 2            # 拐点突变倍数：P99 涨到健康基线的 2 倍即视为过载（相对突变，自适应任何负载）
 KNEE_FLOOR_US  = 5_000        # 阈值下限：健康基线太小时（如 11B）防止噪声误判（wrk2 协调遗漏修正虚高约 1ms）
 PORT_BASE = 6666
 HOST      = "127.0.0.1"   # 目标服务器地址（内网双机时设为服务端内网 IP）
@@ -354,37 +355,51 @@ def run_wrk(url, c, lua_path, wrk_cores, dur, server_pid, rate, perf_events=None
     return r, wrk_cpu, out, perf
 
 
-# ── 峰值扫描（自适应基线 + 相对突变，找 P99 暴涨的拐点）────────────
+# ── 峰值扫描（3 探测点定位 + 二分收敛，找 P99 突变拐点）────────────
 def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, est_per_core):
-    """自适应拐点检测：先测最低档作为健康基线，以「基线 × KNEE_RATIO」为过载阈值，
-    从低到高扫，P99 相对基线突变（超过阈值）即判过载，拐点取前一档。
+    """拐点检测：以历史数据预估的 est 为中心，取 3 个探测点（0.6/1.0/1.4×est），
+    找到 P99 超过「基线×KNEE_RATIO」的过载档后，在健康档与过载档之间二分收敛到精确上界。
     阈值自适应于实际负载的健康延迟，不硬编码任何消息大小的绝对延迟。"""
     url = f"http://{HOST}:{port}{url_path}"
     est = max(1000, sub * est_per_core)
-    candidates = sorted({int(est * f) for f in (0.2, 0.4, 0.6, 0.8, 1.0, 1.25)})
-    log(f"  [{name}] {url_path} 预估 {est}，-R 候选: {candidates}")
+    probes = [int(est * f) for f in (0.6, 1.0, 1.4)]
+    log(f"  [{name}] {url_path} 预估 {est}，探测点: {probes}")
 
-    # 1) 先测最低档，作为健康基线；过载阈值 = max(基线 × KNEE_RATIO, KNEE_FLOOR_US)
-    r, _, _, _ = run_wrk(url, WRK_CONC, None, wrk_cores, SCAN_DUR, server_pid, candidates[0])
-    base_p99 = r["lat"].get(99.0) or KNEE_FLOOR_US
-    threshold = max(base_p99 * KNEE_RATIO, KNEE_FLOOR_US)
-    log(f"  [{name}] 基线 P99={base_p99:.0f}us，过载阈值={threshold:.0f}us")
-
-    prev_ok = candidates[0]
-    for rate in candidates[1:]:
+    def overloaded(rate):
         r, wrk_cpu, _, _ = run_wrk(url, WRK_CONC, None, wrk_cores, SCAN_DUR, server_pid, rate)
         p99 = r["lat"].get(99.0)
         err = r["err_connect"] + r["err_read"] + r["err_write"] + r["err_timeout"]
         log(f"  [{name}] 扫 -R{rate}: QPS={r['qps']:.0f}, p99={p99}, err={err}")
-        if r["qps"] <= 0 or wrk_cpu > len(wrk_cores) * 90.0:
-            log(f"  [{name}] -R{rate} 失败或客户端饱和，拐点取前一档 {prev_ok}")
-            return prev_ok
-        if (p99 is not None and p99 > threshold) or err > 0:
-            log(f"  [{name}] -R{rate} 过载（P99>{threshold/1000:.0f}ms 或出错），拐点取前一档 {prev_ok}")
-            return prev_ok
-        prev_ok = rate
-    log(f"  [{name}] 未扫到拐点，用最高候选 {candidates[-1]}")
-    return candidates[-1]
+        return (r["qps"] <= 0 or wrk_cpu > len(wrk_cores) * 90.0
+                or (p99 is not None and p99 > threshold) or err > 0)
+
+    # 1) 测最低探测点，作为健康基线
+    r, _, _, _ = run_wrk(url, WRK_CONC, None, wrk_cores, SCAN_DUR, server_pid, probes[0])
+    base_p99 = r["lat"].get(99.0) or KNEE_FLOOR_US
+    threshold = max(base_p99 * KNEE_RATIO, KNEE_FLOOR_US)
+    log(f"  [{name}] 基线 P99={base_p99:.0f}us，过载阈值={threshold:.0f}us")
+
+    # 2) 扫后两个探测点，定位 [low 健康, high 过载]
+    low, high = probes[0], None
+    for rate in probes[1:]:
+        if overloaded(rate):
+            high = rate
+            break
+        low = rate
+    if high is None:
+        log(f"  [{name}] 探测点均健康，拐点 > {probes[-1]}，用最高探测点")
+        return probes[-1]
+
+    # 3) 二分收敛 [low, high]，找最高健康速率
+    span = max(1000, int(est * 0.05))
+    while high - low > span:
+        mid = (low + high) // 2
+        if overloaded(mid):
+            high = mid
+        else:
+            low = mid
+    log(f"  [{name}] 拐点收敛到 {low}")
+    return low
 
 
 # ── 单场景测试（精简：每个响应大小扫拐点 → 拐点处 30s + perf）─────
