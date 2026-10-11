@@ -92,7 +92,8 @@ WRK_THREADS    = 0            # 0 表示自动 = wrk 核数
 DURATION       = 30           # 拐点处正式测试时长（秒）
 REPEAT         = 3            # 拐点处重复次数，取中位数（平滑偶发噪声）
 SCAN_DUR       = 15           # 峰值扫描每档时长（秒），15s 让尾延迟 P99 更稳
-KNEE_P99_US    = 5_000        # 拐点判定：P99 超过 5ms 即视为过载（wrk2 协调遗漏修正下健康负载报告约 1~2ms）
+KNEE_RATIO     = 5            # 拐点突变倍数：P99 涨到健康基线的 5 倍即视为过载（相对突变，自适应任何负载）
+KNEE_FLOOR_US  = 5_000        # 阈值下限：健康基线太小时（如 11B）防止噪声误判（wrk2 协调遗漏修正虚高约 1ms）
 PORT_BASE = 6666
 HOST      = "127.0.0.1"   # 目标服务器地址（内网双机时设为服务端内网 IP）
 
@@ -351,17 +352,24 @@ def run_wrk(url, c, lua_path, wrk_cores, dur, server_pid, rate, perf_events=None
     return r, wrk_cpu, out, perf
 
 
-# ── 峰值扫描（从低往上，找 P99 超过阈值的拐点）───────────────────
+# ── 峰值扫描（自适应基线 + 相对突变，找 P99 暴涨的拐点）────────────
 def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, est_per_core):
-    """从低速率往上扫，返回「P99 仍可接受的最高速率」= 过载档的前一档。
-    避免拐点落在过载区，让正式测的 P99 落在毫秒级「可用吞吐」区间。"""
+    """自适应拐点检测：先测最低档作为健康基线，以「基线 × KNEE_RATIO」为过载阈值，
+    从低到高扫，P99 相对基线突变（超过阈值）即判过载，拐点取前一档。
+    阈值自适应于实际负载的健康延迟，不硬编码任何消息大小的绝对延迟。"""
     url = f"http://{HOST}:{port}{url_path}"
     est = max(1000, sub * est_per_core)
     candidates = sorted({int(est * f) for f in (0.2, 0.4, 0.6, 0.8, 1.0, 1.25)})
     log(f"  [{name}] {url_path} 预估 {est}，-R 候选: {candidates}")
 
+    # 1) 先测最低档，作为健康基线；过载阈值 = max(基线 × KNEE_RATIO, KNEE_FLOOR_US)
+    r, _, _, _ = run_wrk(url, WRK_CONC, None, wrk_cores, SCAN_DUR, server_pid, candidates[0])
+    base_p99 = r["lat"].get(99.0) or KNEE_FLOOR_US
+    threshold = max(base_p99 * KNEE_RATIO, KNEE_FLOOR_US)
+    log(f"  [{name}] 基线 P99={base_p99:.0f}us，过载阈值={threshold:.0f}us")
+
     prev_ok = candidates[0]
-    for rate in candidates:
+    for rate in candidates[1:]:
         r, wrk_cpu, _, _ = run_wrk(url, WRK_CONC, None, wrk_cores, SCAN_DUR, server_pid, rate)
         p99 = r["lat"].get(99.0)
         err = r["err_connect"] + r["err_read"] + r["err_write"] + r["err_timeout"]
@@ -369,8 +377,8 @@ def scan_knee(name, sub, port, server_cores, wrk_cores, server_pid, url_path, es
         if r["qps"] <= 0 or wrk_cpu > len(wrk_cores) * 90.0:
             log(f"  [{name}] -R{rate} 失败或客户端饱和，拐点取前一档 {prev_ok}")
             return prev_ok
-        if (p99 is not None and p99 > KNEE_P99_US) or err > 0:
-            log(f"  [{name}] -R{rate} 过载（P99>{KNEE_P99_US/1000:.0f}ms 或出错），拐点取前一档 {prev_ok}")
+        if (p99 is not None and p99 > threshold) or err > 0:
+            log(f"  [{name}] -R{rate} 过载（P99>{threshold/1000:.0f}ms 或出错），拐点取前一档 {prev_ok}")
             return prev_ok
         prev_ok = rate
     log(f"  [{name}] 未扫到拐点，用最高候选 {candidates[-1]}")
