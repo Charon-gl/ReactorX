@@ -69,6 +69,8 @@ Testing/
 benchmark/data/
 benchmark/archive/
 benchmark/analysis/
+benchmark/echo/echo_server
+benchmark/echo/echo_client
 
 #logger
 Log/
