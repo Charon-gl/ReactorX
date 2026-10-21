@@ -164,8 +164,19 @@ int http_handler::on_message_complete(llhttp_t* parser)
     it->request.version.push_back(static_cast<char>('0' + llhttp_get_http_minor(parser)));
     it->request.keepalive = llhttp_should_keep_alive(parser);
 
-    // 将解析好的请求报文交给业务层
-    if(it->push_request)
+    if(it->push_request_async)
+    {
+        auto* dispatcher = it->dispatcher_;
+        const auto token = it->token_;
+        const auto major = llhttp_get_http_major(parser);
+        const auto minor = llhttp_get_http_minor(parser);
+        const bool is_close = !it->request.keepalive;
+        it->push_request_async(it->request,
+            [dispatcher, token, major, minor, is_close](HttpResponse response_data){
+                submit_response(dispatcher, token, response_data, is_close, major, minor);
+            });
+    }
+    else if(it->push_request)
     {
         const auto& response_data = it->push_request(it->request);
         it->response(response_data, !it->request.keepalive);
@@ -176,13 +187,19 @@ int http_handler::on_message_complete(llhttp_t* parser)
 
 void http_handler::response(const HttpResponse& data, bool is_close)
 {
+    submit_response(dispatcher_, token_, data, is_close,
+                    llhttp_get_http_major(parser.get()), llhttp_get_http_minor(parser.get()));
+}
+
+void http_handler::submit_response(Dispatcher* dispatcher, ConnectionToken token,
+                                   const HttpResponse& data, bool is_close,
+                                   uint8_t major, uint8_t minor)
+{
     // 预分配，避免拼接过程中多次扩容重分配（响应头约 128 字节 + body）
     std::string response_buf;
     response_buf.reserve(data.body.size() + 128);
 
     // 版本号（解析失败时可能为 0.0，默认按 1.1 处理）
-    uint8_t major = llhttp_get_http_major(parser.get());
-    uint8_t minor = llhttp_get_http_minor(parser.get());
     if(major == 0 && minor == 0)
     {
         major = 1;
@@ -230,13 +247,23 @@ void http_handler::response(const HttpResponse& data, bool is_close)
     // 而 to_send 会把 request_count 减到 0，因此先 close 后 send，
     // 才能保证响应全部发送完成后连接才被关闭，避免响应丢失。
     if(is_close)
-        dispatcher_->submit_operation(Operation{Close_Operation{token_}});
-    dispatcher_->submit_operation(Operation{Send_Operation{token_, std::move(response_buf)}});
+        dispatcher->submit_operation(Operation{Close_Operation{token}});
+    dispatcher->submit_operation(Operation{Send_Operation{token, std::move(response_buf)}});
 
     return;
 }
 
-void http_handler::set_push_request(std::function<HttpResponse(const HttpRequest&)> _cb) { push_request = std::move(_cb); }
+void http_handler::set_push_request(std::function<HttpResponse(const HttpRequest&)> _cb)
+{
+    push_request = std::move(_cb);
+    push_request_async = {};
+}
+
+void http_handler::set_push_request_async(std::function<void(const HttpRequest&, response_callback)> cb)
+{
+    push_request_async = std::move(cb);
+    push_request = {};
+}
 
 http_handler::~http_handler()
 {

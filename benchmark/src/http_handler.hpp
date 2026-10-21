@@ -55,6 +55,9 @@ static std::unordered_map<int, std::string> status_reason =
 
 class http_handler
 {
+public:
+    using response_callback = std::function<void(HttpResponse)>;
+
 private:
     std::unique_ptr<llhttp_t> parser;
     Dispatcher* dispatcher_;
@@ -74,6 +77,10 @@ private:
 
     // 业务层接口
     std::function<HttpResponse(const HttpRequest&)> push_request;
+    std::function<void(const HttpRequest&, response_callback)> push_request_async;
+
+    static void submit_response(Dispatcher*, ConnectionToken, const HttpResponse&,
+                                bool, uint8_t, uint8_t);
 
 public:
     static const llhttp_settings_t& setting();
@@ -89,6 +96,7 @@ public:
     void on_request(ByteStream stream);
 
     void set_push_request(std::function<HttpResponse(const HttpRequest&)> _cb);
+    void set_push_request_async(std::function<void(const HttpRequest&, response_callback)> cb);
 
     void response(const HttpResponse&, bool is_close = false);
 

@@ -3,7 +3,8 @@
 #include <mutex>
 #include <queue>
 #include <condition_variable>
-#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <thread>
 #include <functional>
 #include "reactor/MainReactor.hpp"
@@ -106,14 +107,16 @@ public:
         }
     }
 
-    // 业务逻辑：根据 url 路由到不同大小的压测数据。
-    // body 直接引用 test_data 中的静态数据（string_view，零拷贝），
-    // 不设置 Content-Type，让压测路径上的分配降到最低。
+    // 业务逻辑：调用共享业务函数，在 subreactor 线程执行。
+    // sync 模式下 subreactor 线程首次执行时标记自身类型。
     HttpResponse push_response(const HttpRequest& req)
     {
-        HttpResponse resp{200};
-        resp.body = test_data::route(req.url);
-        return resp;
+        static thread_local bool _ = [](){
+            business::mark_thread_subreactor();
+            return true;
+        }();
+        (void)_;
+        return business::process_request(req);
     }
 
     void run() { reactor->run(); }
@@ -129,8 +132,8 @@ thread_local std::vector<std::unique_ptr<http_handler>> app_server_sync::free_ha
   Dispatcher::submit_operation（async_port，线程安全）投回框架发送。
 - 每条连接对应一个 handler，用 shared_ptr 跨线程共享：业务线程持有引用，
   close 回调只从 map 移除，handler 在所有引用释放后才析构（避免「使用中析构」）。
-- llhttp 解析是有状态的，同一连接的数据必须串行，因此用 per-connection 锁串行化；
-  不同连接互不干扰，可并发。
+- 同一连接固定路由到一个 worker，由该 worker 的 FIFO 队列保证 llhttp 串行访问，
+  不需要在 worker 内等待 per-connection 锁。
 */
 class app_server_async
 {
@@ -138,18 +141,45 @@ private:
     std::unique_ptr<Dispatcher> dispatcher;
     std::unique_ptr<MainReactor> reactor;
 
-    // 业务线程池
-    std::vector<std::thread> workers;
-    std::queue<std::function<void()>> tasks;
-    std::mutex tasks_mtx;
-    std::condition_variable tasks_cv;
-    std::atomic<bool> stop{false};
+    struct worker_queue
+    {
+        std::queue<std::function<void()>> tasks;
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool stopping = false;
+    };
 
-    // 每个连接一个 handler + 串行锁
+    std::vector<std::unique_ptr<worker_queue>> worker_queues;
+    std::vector<std::thread> workers;
+
+    struct timer_task
+    {
+        std::chrono::steady_clock::time_point deadline;
+        uint64_t sequence;
+        std::function<void()> task;
+    };
+
+    struct later_timer
+    {
+        bool operator()(const timer_task& left, const timer_task& right) const
+        {
+            if (left.deadline != right.deadline)
+                return left.deadline > right.deadline;
+            return left.sequence > right.sequence;
+        }
+    };
+
+    std::priority_queue<timer_task, std::vector<timer_task>, later_timer> timers;
+    std::mutex timers_mtx;
+    std::condition_variable timers_cv;
+    bool timer_stopping = false;
+    uint64_t timer_sequence = 0;
+    std::thread timer_thread;
+
+    // 每个连接一个 handler；连接亲和 worker 队列负责串行化请求
     struct handler_ctx
     {
         std::shared_ptr<http_handler> handler;
-        std::mutex mtx;                 // 串行化同一连接的请求
     };
     std::mutex handlers_mtx;            // 保护 handlers（多个 subreactor 线程 + close 回调并发访问）
     std::unordered_map<ConnectionToken, std::shared_ptr<handler_ctx>> handlers;
@@ -174,30 +204,88 @@ public:
 
     ~app_server_async()
     {
-        // 先停业务线程（join 前让其处理完剩余任务），再析构 reactor（成员逆序析构）
+        // 先排空已接收的业务任务，再停止定时器，最后析构 reactor。
         stop_workers();
+        stop_timer();
     }
 
     // ---------- 业务线程池 ----------
     void start_workers(int n)
     {
-        workers.reserve(n);
-        for (int i = 0; i < n; ++i)
-            workers.emplace_back([this]{ worker_loop(); });
+        const int worker_count = n > 0 ? n : 1;
+        worker_queues.reserve(worker_count);
+        workers.reserve(worker_count);
+        for (int i = 0; i < worker_count; ++i)
+            worker_queues.push_back(std::make_unique<worker_queue>());
+
+        for (int i = 0; i < worker_count; ++i)
+            workers.emplace_back([this, i]{ worker_loop(*worker_queues[i]); });
+
     }
 
-    void worker_loop()
+    void schedule_after(std::chrono::milliseconds delay, std::function<void()> task)
     {
+        {
+            std::lock_guard<std::mutex> lock(timers_mtx);
+            if (!timer_thread.joinable())
+                timer_thread = std::thread([this]{ timer_loop(); });
+            timers.push(timer_task{std::chrono::steady_clock::now() + delay,
+                                   timer_sequence++, std::move(task)});
+        }
+        timers_cv.notify_one();
+    }
+
+    void timer_loop()
+    {
+        std::unique_lock<std::mutex> lock(timers_mtx);
+        while (!timer_stopping)
+        {
+            if (timers.empty())
+            {
+                timers_cv.wait(lock, [this]{ return timer_stopping || !timers.empty(); });
+                continue;
+            }
+
+            const auto deadline = timers.top().deadline;
+            if (timers_cv.wait_until(lock, deadline) != std::cv_status::timeout)
+                continue;
+            if (timer_stopping || timers.empty() || timers.top().deadline > std::chrono::steady_clock::now())
+                continue;
+
+            auto task = std::move(const_cast<timer_task&>(timers.top()).task);
+            timers.pop();
+            lock.unlock();
+            task();
+            lock.lock();
+        }
+    }
+
+    void stop_timer()
+    {
+        {
+            std::lock_guard<std::mutex> lock(timers_mtx);
+            timer_stopping = true;
+            while (!timers.empty())
+                timers.pop();
+        }
+        timers_cv.notify_one();
+        if (timer_thread.joinable())
+            timer_thread.join();
+    }
+
+    void worker_loop(worker_queue& queue)
+    {
+        business::mark_thread_worker();
         while (true)
         {
             std::function<void()> task;
             {
-                std::unique_lock<std::mutex> lock(tasks_mtx);
-                tasks_cv.wait(lock, [this]{ return stop.load() || !tasks.empty(); });
-                if (stop.load() && tasks.empty())
+                std::unique_lock<std::mutex> lock(queue.mtx);
+                queue.cv.wait(lock, [&queue]{ return queue.stopping || !queue.tasks.empty(); });
+                if (queue.stopping && queue.tasks.empty())
                     return;
-                task = std::move(tasks.front());
-                tasks.pop();
+                task = std::move(queue.tasks.front());
+                queue.tasks.pop();
             }
             task();
         }
@@ -205,27 +293,35 @@ public:
 
     void stop_workers()
     {
-        stop.store(true);
-        tasks_cv.notify_all();
+        for (auto& queue : worker_queues)
+        {
+            {
+                std::lock_guard<std::mutex> lock(queue->mtx);
+                queue->stopping = true;
+            }
+            queue->cv.notify_one();
+        }
         for (auto& t : workers)
             if (t.joinable())
                 t.join();
     }
 
-    void enqueue(std::function<void()> task)
+    void enqueue(std::size_t worker_index, std::function<void()> task)
     {
+        auto& queue = *worker_queues[worker_index];
         {
-            std::lock_guard<std::mutex> lock(tasks_mtx);
-            tasks.emplace(std::move(task));
+            std::lock_guard<std::mutex> lock(queue.mtx);
+            queue.tasks.emplace(std::move(task));
         }
-        tasks_cv.notify_one();
+        queue.cv.notify_one();
     }
 
     // ---------- 框架回调（subreactor 线程） ----------
     void on_data(ByteStream stream)
     {
+        const auto worker_index = std::hash<ConnectionToken>{}(stream.token) % worker_queues.size();
         auto ctx = get_or_create_ctx(stream.token);
-        enqueue([ctx, stream = std::move(stream)]() mutable {
+        enqueue(worker_index, [ctx, stream = std::move(stream)]() mutable {
             process(std::move(ctx), std::move(stream));
         });
     }
@@ -241,7 +337,6 @@ public:
     // ---------- 业务线程执行 ----------
     static void process(std::shared_ptr<handler_ctx> ctx, ByteStream stream)
     {
-        std::lock_guard<std::mutex> lock(ctx->mtx);
         ctx->handler->on_request(std::move(stream));
     }
 
@@ -254,20 +349,14 @@ public:
 
         auto ctx = std::make_shared<handler_ctx>();
         ctx->handler = std::make_shared<http_handler>(dispatcher.get());
-        ctx->handler->set_push_request([this](const HttpRequest& req){
-            return push_response(req);
+        // 异步模式：业务在 worker 线程执行，完成后通过 complete 回投 subreactor 发送
+        ctx->handler->set_push_request_async([this](const HttpRequest& req,
+                                                    http_handler::response_callback complete){
+            complete(business::process_request(req));
         });
         ctx->handler->activate(token);
         handlers.emplace(token, ctx);
         return ctx;
-    }
-
-    // ---------- 业务逻辑（与同步模式一致） ----------
-    HttpResponse push_response(const HttpRequest& req)
-    {
-        HttpResponse resp{200};
-        resp.body = test_data::route(req.url);
-        return resp;
     }
 
     void run() { reactor->run(); }

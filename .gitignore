@@ -68,9 +68,20 @@ Testing/
 .cache/
 benchmark/data/
 benchmark/archive/
-benchmark/analysis/
+benchmark/analysis/data/
+benchmark/analysis/tmp/
+benchmark/analysis/0*_*.md
+benchmark/analysis/analysis_report.md
+benchmark/analysis/README.md
+benchmark/analysis/*.py
+benchmark/generate_echo_analysis.py
+benchmark/generate_cdf.py
+benchmark/isolation_data.tar.gz
 benchmark/echo/echo_server
 benchmark/echo/echo_client
+benchmark/scripts/__pycache__/
+benchmark/scripts/echo/echo_client
+benchmark/scripts/echo/echo_server
 
 #logger
 Log/

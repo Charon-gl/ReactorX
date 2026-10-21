@@ -19,6 +19,7 @@ import sys
 import time
 import signal
 import argparse
+import importlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -36,11 +37,23 @@ def measure(url, srv, wrk_cores, dur=3):
 
 
 def main():
+    global core
     parser = argparse.ArgumentParser()
     parser.add_argument("--ns", type=str, default="50000,100000,200000,300000,500000,800000",
                         help="逗号分隔的 compute 迭代次数列表")
     parser.add_argument("--delay-ms", type=str, default="1,2,5", help="逗号分隔的 delay 毫秒列表")
+    parser.add_argument("--cloud", action="store_true", help="使用云端自动探测的核拓扑和场景")
     args = parser.parse_args()
+
+    if args.cloud:
+        cloud = importlib.import_module("bench_cloud")
+        core = cloud.core
+        cloud.validate_topology(["sync-4"])
+        scene_name = "sync-4"
+    else:
+        scene_name = "sync-1"
+
+    core.OUTPUT_DIR = Path("/tmp/reactorx_calibrate")
 
     ns = [int(x) for x in args.ns.split(",")]
     delay_ms = [int(x) for x in args.delay_ms.split(",")]
@@ -48,32 +61,34 @@ def main():
     core.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     port = 6666
-    server_cores, wrk_cores = core.alloc_cores(1, None)   # sync-1 单核，避免并行干扰
-    srv, srv_log = core.start_server_retry("sync-1", port, server_cores)
+    _, _, sub, worker = core.scenario_info(scene_name)
+    server_cores, wrk_cores = core.alloc_cores(sub, worker)
+    srv, srv_log = core.start_server_retry(scene_name, port, server_cores)
     if srv is None:
-        print("服务器启动失败，见 server_sync-1.log")
+        print(f"服务器启动失败，见 server_{scene_name}.log")
         sys.exit(1)
 
     try:
         # 预热
-        core.run_wrk(f"http://127.0.0.1:{port}/", core.WRK_CONC, None, wrk_cores, 3, srv.pid, 50000)
+        host = core.HOST
+        core.run_wrk(f"http://{host}:{port}/", core.WRK_CONC, None, wrk_cores, 3, srv.pid, 50000)
         time.sleep(1)
 
         print("\n════ compute（CPU 密集）耗时校准 ════")
         print(f"{'n(迭代次数)':>12} {'QPS':>10} {'单请求耗时':>12}")
         for n in ns:
-            qps = measure(f"http://127.0.0.1:{port}/compute?n={n}", srv, wrk_cores)
+            qps = measure(f"http://{host}:{port}/compute?n={n}", srv, wrk_cores)
             cost_us = 1_000_000 / qps if qps > 0 else float("inf")
             print(f"{n:>12} {qps:>10,.1f} {cost_us:>10,.1f} us")
 
         print("\n════ delay（I/O 等待）耗时校准 ════")
         print(f"{'ms':>6} {'QPS':>10} {'单请求耗时':>12}")
         for ms in delay_ms:
-            qps = measure(f"http://127.0.0.1:{port}/delay?ms={ms}", srv, wrk_cores)
+            qps = measure(f"http://{host}:{port}/delay?ms={ms}", srv, wrk_cores)
             cost_us = 1_000_000 / qps if qps > 0 else float("inf")
             print(f"{ms:>6} {qps:>10,.1f} {cost_us:>10,.1f} us")
 
-        print("\n提示：找「单请求耗时 ≈ 1000 us」对应的 n，作为 compute 的默认迭代次数。")
+        print("\n提示：找「单请求耗时 ≈ 1000 us」对应的 n。本次运行可用 REACTORX_COMPUTE_N=<n> 覆盖云端值。")
     finally:
         srv.send_signal(signal.SIGTERM)
         try:

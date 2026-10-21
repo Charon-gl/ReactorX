@@ -133,3 +133,146 @@ inline const std::string& route(const std::string& url)
 }
 
 } // namespace test_data
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 共享业务层：sync/async 模式共用的阻塞业务函数
+//
+// 两类阻塞负载：
+//   /fast           → sleep 1ms（短 IO 等待）
+//   /slow           → sleep 300ms（长 IO 等待，可通过 ?ms=N 调整）
+//   /compute?n=N    → CPU 密集循环（xorshift，默认 300000 次 ≈1ms）
+//   其他路径          → 走原 test_data::route()
+//
+// 两个模式调用完全相同的函数，唯一差异是执行线程：
+//   - sync  模式：subreactor 线程执行 → 阻塞 IO 线程
+//   - async 模式：worker 线程执行     → IO 线程不被阻塞
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include <atomic>
+#include <cstdlib>
+#include "http_handler.hpp"
+
+namespace business {
+
+// ── 线程类型标记（thread_local，无锁）────────────────────────────
+// sync 模式在 subreactor 线程首次执行业务时标记，
+// async 模式在 worker 线程启动时标记。
+// 通过函数内 static thread_local 引用实现，无需额外 .cpp 定义。
+inline const char*& _thread_type_ref()
+{
+    thread_local const char* val = nullptr;
+    return val;
+}
+
+inline void mark_thread_subreactor()
+{
+    _thread_type_ref() = "subreactor";
+}
+
+inline void mark_thread_worker()
+{
+    _thread_type_ref() = "worker";
+}
+
+inline const char* current_thread_type()
+{
+    const char* t = _thread_type_ref();
+    return t ? t : "unknown";
+}
+
+// ── 共享阻塞业务入口 ────────────────────────────────────────────
+// sync 和 async 都调用此函数，仅在各自配置的线程上执行。
+inline HttpResponse process_request(const HttpRequest& req)
+{
+    HttpResponse resp{200};
+
+    if (req.url == "/fast")
+    {
+        test_data::delay_wait(1);
+        resp.body = test_data::small();
+    }
+    else if (req.url.rfind("/slow", 0) == 0)
+    {
+        const int ms = test_data::query_int(req.url, "ms", 300);
+        test_data::delay_wait(ms);
+        resp.body = test_data::small();
+    }
+    else if (req.url.rfind("/compute", 0) == 0)
+    {
+        test_data::compute_busy_work(test_data::query_int(req.url, "n", 300000));
+        resp.body = test_data::small();
+    }
+    else
+    {
+        resp.body = test_data::route(req.url);
+    }
+
+    // 响应头标注执行线程类型，便于 curl 验证
+    resp.headers.emplace_back("X-Exec-Thread", current_thread_type());
+
+    return resp;
+}
+
+// ── 低开销埋点（可关闭、可采样）─────────────────────────────────
+// 通过环境变量 REACTORX_PROFILE 控制：
+//   未设置  → 完全关闭，函数体为空，编译器可优化掉
+//   "1"    → 100% 采样
+//   "N"    → N% 采样（与 (counter % 100 < N) 比较）
+//
+// thread_local ring buffer，无锁写入；使用 steady_clock 单调时钟。
+namespace profile {
+
+inline bool enabled()
+{
+    static const int val = []() -> int {
+        const char* env = std::getenv("REACTORX_PROFILE");
+        if (!env || env[0] == '\0') return 0;
+        return std::atoi(env);
+    }();
+    return val > 0;
+}
+
+inline int sample_rate()
+{
+    static const int val = []() -> int {
+        const char* env = std::getenv("REACTORX_PROFILE");
+        if (!env || env[0] == '\0') return 0;
+        int v = std::atoi(env);
+        return (v > 0 && v <= 100) ? v : 100;
+    }();
+    return val;
+}
+
+struct Sample
+{
+    uint64_t start_ns;
+    uint64_t end_ns;
+    bool is_blocking;   // slow 或 compute 为 true
+};
+
+inline thread_local Sample tls_samples[4096];
+inline thread_local uint32_t tls_sample_idx = 0;
+inline thread_local uint32_t tls_req_counter = 0;
+
+inline void record_start(bool is_blocking)
+{
+    if (!enabled()) return;
+    ++tls_req_counter;
+    if (static_cast<int>(tls_req_counter % 100) >= sample_rate()) return;
+    auto& s = tls_samples[tls_sample_idx % 4096];
+    s.start_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+    s.is_blocking = is_blocking;
+}
+
+inline void record_end()
+{
+    if (!enabled()) return;
+    if (static_cast<int>(tls_req_counter % 100) >= sample_rate()) return;
+    auto& s = tls_samples[tls_sample_idx % 4096];
+    s.end_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+    ++tls_sample_idx;
+}
+
+} // namespace profile
+
+} // namespace business
