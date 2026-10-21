@@ -1,5 +1,7 @@
 # ReactorX 性能测试分析报告
 
+> 项目概览与使用文档见 [`main`](https://github.com/Charon-gl/ReactorX/blob/main/README.md) 分支。
+
 ## 一、测试环境
 
 ### 1.1 硬件平台
