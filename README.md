@@ -262,6 +262,13 @@ ReactorX/
 
 ## 性能
 
-完整测试方案见 [`benchmark/docs/test_plan.md`](benchmark/docs/test_plan.md)。
+[`benchmark`](https://github.com/Charon-gl/ReactorX/blob/benchmark/README.md) 分支包含完整的性能测试分析报告，涵盖：
 
-> 数据与分析整理中。
+- **本机 & 云端双环境**：i7-13650HX / Xeon 8475B / AMD EPYC
+- **吞吐与扩展性**：sub 1→32 线性扩展，64KB 负载完美线性（100%）
+- **Sync vs Async 对照**：IO 阻塞场景 async P99 仅为 sync 的 1/6
+- **隔离性实验**：混合负载下 async 将尾部延迟降低 43%–80%
+- **微架构分析**：perf + 火焰图定位瓶颈到内存带宽与内核 TX 路径
+- **Echo 纯框架性能**：TCP 往返 P50 低至 14µs
+
+> 切换到 [`benchmark`](https://github.com/Charon-gl/ReactorX/tree/benchmark) 分支查看完整报告、图表与压测脚本。
