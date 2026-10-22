@@ -3,7 +3,7 @@
 > 基于 epoll 的主从 Reactor TCP 网络框架  
 > 主要负责两件事：**管理连接**，**传递字节流**
 
-`C++20` · `Linux` · `epoll`
+`C++17` · `Linux` · `epoll`
 
 ---
 
@@ -172,7 +172,7 @@ sequenceDiagram
 ### 环境要求
 
 - Linux（内核支持 epoll）
-- C++20 编译器：g++ 11+ 或 clang 14+
+- C++17+ 编译器：g++ 11+ 或 clang 14+
 - CMake 3.15+
 
 ### 极简示例
@@ -231,7 +231,7 @@ cmake --build build -j$(nproc)
 ### 编译链接
 
 ```bash
-g++ -std=c++20 main.cpp -I<path/to/include> build/libReactorX.a -pthread -o server
+g++ -std=c++17 main.cpp -I<path/to/include> build/libReactorX.a -pthread -o server
 ./server 6666 4
 ```
 
