@@ -1,4 +1,4 @@
-# benchmark/CMakeLists.txt —— HTTP 演示服务器（仅测试/演示分支使用）
+# benchmark/CMakeLists.txt
 #
 # 依赖：
 #   - 框架库 ReactorX（由根 CMakeLists.txt 编译，见根目录）
